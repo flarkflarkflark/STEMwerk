@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Cross-platform REAPER test harness for STEMwerk.
 Launches REAPER, runs separation scripts, validates stem outputs.
