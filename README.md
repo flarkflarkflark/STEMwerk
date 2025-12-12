@@ -70,6 +70,17 @@ STEMwerk integrates directly into REAPER, letting you:
 
 ## Features
 
+### Internationalization
+
+STEMwerk supports multiple languages:
+- **English (EN)** - Default language
+- **Dutch (NL)** - Nederlands
+- **German (DE)** - Deutsch
+
+All UI elements are translated including stem names, presets, tooltips, help text, and error messages. Language files are located in `i18n/languages.lua` with 152 translation keys per language.
+
+To add a new language, copy the `en` block in `i18n/languages.lua` and translate all keys. See [TESTING.md](TESTING.md#internationalization-testing) for validation tools.
+
 ### Stem Types
 
 | Model | Stems | Best For |

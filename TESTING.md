@@ -365,6 +365,75 @@ To add SNR/SDR validation (requires reference stems):
 - [Demucs models](https://github.com/facebookresearch/demucs)
 - [CI workflow examples](.github/workflows/)
 
+## Internationalization Testing
+
+STEMwerk supports EN/NL/DE translations. Test the language files with:
+
+```bash
+# Validate all languages
+python tests/i18n/test_languages.py
+```
+
+### I18n Test Suite
+
+The test suite validates:
+- **All languages present**: Checks for `en`, `nl`, `de` in `i18n/languages.lua`
+- **Completeness**: All languages have same keys as English reference
+- **Critical keys**: Essential UI elements present (stems, presets, states)
+- **Coverage report**: Shows translation completeness percentage
+
+Example output:
+```
+Testing STEMwerk Language Files
+
+--- All languages present ---
+✓ All expected languages present: {'en', 'nl', 'de'}
+
+--- Language completeness ---
+✓ English has 152 keys
+✓ NL complete (152 keys)
+✓ DE complete (152 keys)
+
+=== Language Coverage Report ===
+Language   Keys       Coverage   Status
+---------------------------------------------
+DE         152         100.0%    ✓ Complete
+EN         152         100.0%    ✓ Complete
+NL         152         100.0%    ✓ Complete
+```
+
+### Critical Keys
+
+The test suite validates these essential UI keys are present in all languages:
+- Stems: `vocals`, `drums`, `bass`, `other`, `guitar`, `piano`
+- Presets: `karaoke`, `all_stems`, `instrumental`
+- States: `processing`, `cancelled`
+- Options: `help`, `new_tracks`, `in_place`, `parallel`, `sequential`
+
+### Testing Language Switching
+
+Manual test workflow:
+1. Open STEMwerk in REAPER
+2. Switch language in settings (if UI available)
+3. Verify all UI elements display translated text
+4. Test with different presets and stem selections
+5. Confirm tooltips and help text are translated
+
+### Adding New Languages
+
+To add a new language:
+1. Copy the `en` block in `i18n/languages.lua`
+2. Translate all 152 keys
+3. Add language code to test suite's `expected_languages` set
+4. Run `python tests/i18n/test_languages.py` to validate
+
+### CI Integration
+
+I18n tests run automatically in the `ci-full.yml` workflow:
+- Validates language file structure
+- Checks completeness across all languages
+- Fails if any language is missing keys
+
 ## Support
 
 Issues or questions? Open an issue at:

@@ -29,6 +29,11 @@ jobs:
           # lightweight invocation that doesn't require heavy ML stacks
           python scripts/reaper/audio_separator_process.py --help
 
-      - name: Run tests
+      - name: Test i18n completeness
         run: |
-          pytest -q
+          python tests/i18n/test_languages.py
+          if [ $? -ne 0 ]; then
+            echo "Language file validation failed"
+            exit 1
+          fi
+
