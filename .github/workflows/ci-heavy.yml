@@ -1,0 +1,29 @@
+name: CI Heavy (manual/scheduled)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 3 * * 0' # weekly: Sunday 03:00 UTC
+
+jobs:
+  heavy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install heavy CI dependencies
+        run: |
+          python -m pip install -r requirements-ci.txt
+
+      - name: Run audio separation checks
+        run: |
+          # run the heavier checks that may download models
+          python scripts/reaper/audio_separator_process.py --check

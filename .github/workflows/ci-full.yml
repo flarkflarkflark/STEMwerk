@@ -3,10 +3,11 @@ name: CI Full
 on:
   push:
     branches: [ main ]
-  workflow_dispatch: {}
+  pull_request:
+    branches: [ main ]
 
 jobs:
-  full-check:
+  tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,14 +20,14 @@ jobs:
       - name: Upgrade pip
         run: python -m pip install --upgrade pip
 
-      - name: Install CI dependencies
+      - name: Install test dependencies
         run: |
-          python -m pip install -r requirements-ci.txt
+          python -m pip install pytest soundfile
 
-      - name: Run audio-separator checks
+      - name: Quick script smoke test
         run: |
-          # Run the script's self-check (should avoid heavy downloads when possible)
-          python scripts/reaper/audio_separator_process.py --check
+          # lightweight invocation that doesn't require heavy ML stacks
+          python scripts/reaper/audio_separator_process.py --help
 
       - name: Run tests
         run: |
