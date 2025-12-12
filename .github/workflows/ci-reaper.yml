@@ -1,4 +1,4 @@
-﻿name: REAPER Cross-Platform Tests
+name: REAPER Cross-Platform Tests
 
 on:
   push:
@@ -32,13 +32,18 @@ jobs:
       - name: Generate test assets
         run: python tests/reaper/generate_test_audio.py
       
-      - name: Run quick smoke tests (simulated)
-        run: python tests/reaper/run_reaper_test.py --filter quick
-        continue-on-error: true
+      - name: Validate test infrastructure
+        run: |
+          echo "Validating test infrastructure (REAPER not available on CI runners)..."
+          python -c "import json; scenarios=json.load(open('tests/reaper/test_scenarios.json')); print(f'Loaded {len(scenarios[\"scenarios\"])} test scenarios'); print('Quick tests:', scenarios['quick_smoke_tests'])"
+          python tests/reaper/generate_rpp.py tests/reaper/test.rpp tests/reaper/assets/test_mix_10s.wav --time-selection 2.0 6.0
+          echo "Test infrastructure validated successfully"
       
-      - name: Upload test outputs
+      - name: Upload test assets
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-outputs-${{ matrix.os }}
-          path: tests/reaper/output/
+          name: test-assets-${{ matrix.os }}
+          path: |
+            tests/reaper/assets/
+            tests/reaper/test.rpp
