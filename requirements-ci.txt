@@ -1,0 +1,3 @@
+audio-separator[cpu]
+soundfile
+pytest
