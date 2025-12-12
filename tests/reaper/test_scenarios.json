@@ -1,0 +1,100 @@
+﻿{
+  "scenarios": [
+    {
+      "name": "karaoke_full_item",
+      "description": "Remove vocals from full media item using karaoke preset",
+      "script": "STEMwerk_AI_Separate.lua",
+      "args": ["--preset", "karaoke"],
+      "selection_type": "media_item",
+      "expected_stems": ["drums", "bass", "other"],
+      "duration_sec": 10,
+      "validate": {
+        "stem_count": 3,
+        "min_duration_sec": 9.5,
+        "max_duration_sec": 10.5,
+        "min_rms_db": -60,
+        "check_sample_rate": 44100
+      }
+    },
+    {
+      "name": "vocals_only_time_selection",
+      "description": "Extract vocals from 4-bar time selection",
+      "script": "STEMwerk_AI_Separate.lua",
+      "args": ["--stem", "vocals"],
+      "selection_type": "time_selection",
+      "time_range": [2.0, 6.0],
+      "expected_stems": ["vocals"],
+      "duration_sec": 4,
+      "validate": {
+        "stem_count": 1,
+        "min_duration_sec": 3.8,
+        "max_duration_sec": 4.2,
+        "min_rms_db": -60
+      }
+    },
+    {
+      "name": "drums_only",
+      "description": "Extract drums to new track",
+      "script": "STEMwerk_AI_Separate.lua",
+      "args": ["--stem", "drums"],
+      "selection_type": "media_item",
+      "expected_stems": ["drums"],
+      "duration_sec": 10,
+      "validate": {
+        "stem_count": 1,
+        "min_duration_sec": 9.5,
+        "max_duration_sec": 10.5,
+        "min_rms_db": -60
+      }
+    },
+    {
+      "name": "all_stems_htdemucs",
+      "description": "Extract all 4 stems using htdemucs model",
+      "script": "STEMwerk_AI_Separate.lua",
+      "args": ["--model", "htdemucs", "--all-stems"],
+      "selection_type": "media_item",
+      "expected_stems": ["vocals", "drums", "bass", "other"],
+      "duration_sec": 10,
+      "validate": {
+        "stem_count": 4,
+        "min_duration_sec": 9.5,
+        "max_duration_sec": 10.5,
+        "min_rms_db": -60
+      }
+    },
+    {
+      "name": "six_stem_htdemucs_6s",
+      "description": "Extract 6 stems (vocals, drums, bass, other, guitar, piano)",
+      "script": "STEMwerk_AI_Separate.lua",
+      "args": ["--model", "htdemucs_6s", "--all-stems"],
+      "selection_type": "media_item",
+      "expected_stems": ["vocals", "drums", "bass", "other", "guitar", "piano"],
+      "duration_sec": 10,
+      "validate": {
+        "stem_count": 6,
+        "min_duration_sec": 9.5,
+        "max_duration_sec": 10.5,
+        "min_rms_db": -60
+      }
+    },
+    {
+      "name": "intersection_time_and_item",
+      "description": "Surgical edit: intersection of time selection and media item",
+      "script": "STEMwerk_AI_Separate.lua",
+      "args": ["--stem", "bass"],
+      "selection_type": "intersection",
+      "time_range": [3.0, 5.0],
+      "expected_stems": ["bass"],
+      "duration_sec": 2,
+      "validate": {
+        "stem_count": 1,
+        "min_duration_sec": 1.8,
+        "max_duration_sec": 2.2,
+        "min_rms_db": -60
+      }
+    }
+  ],
+  "quick_smoke_tests": ["karaoke_full_item", "vocals_only_time_selection"],
+  "full_tests": ["karaoke_full_item", "vocals_only_time_selection", "drums_only", "all_stems_htdemucs"],
+  "heavy_tests": ["all_stems_htdemucs", "six_stem_htdemucs_6s"]
+}
