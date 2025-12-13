@@ -96,5 +96,5 @@
   ],
   "quick_smoke_tests": ["karaoke_full_item", "vocals_only_time_selection"],
   "full_tests": ["karaoke_full_item", "vocals_only_time_selection", "drums_only", "all_stems_htdemucs"],
-  "heavy_tests": ["all_stems_htdemucs", "six_stem_htdemucs_6s"]
+  "heavy_tests": ["all_stems_htdemucs", "six_stem_htdemucs_6s", "intersection_time_and_item"]
 }

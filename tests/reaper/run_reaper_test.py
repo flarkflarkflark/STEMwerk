@@ -90,7 +90,10 @@ class REAPERTestHarness:
             test_audio, 
             scenario_output,
             scenario['expected_stems'],
-            scenario.get('args', [])
+            scenario.get('args', []),
+            selection_type=scenario.get('selection_type'),
+            time_range=scenario.get('time_range'),
+            duration_sec=scenario.get('duration_sec'),
         )
         
         if not success:
@@ -105,8 +108,16 @@ class REAPERTestHarness:
         print(f"Test passed: {scenario['name']}")
         return True
     
-    def simulate_separation(self, input_audio: Path, output_dir: Path, 
-                           stems: List[str], args: List[str]) -> bool:
+    def simulate_separation(
+        self,
+        input_audio: Path,
+        output_dir: Path,
+        stems: List[str],
+        args: List[str],
+        selection_type: Optional[str] = None,
+        time_range: Optional[List[float]] = None,
+        duration_sec: Optional[float] = None,
+    ) -> bool:
         """
         Simulate stem separation by calling the Python backend directly.
         In real tests, this would invoke REAPER which calls the backend.
@@ -115,6 +126,29 @@ class REAPERTestHarness:
         
         try:
             data, sr = sf.read(input_audio)
+
+            # Apply simulated REAPER selection.
+            # - media_item: whole item
+            # - time_selection: crop to provided [start, end] seconds (preferred)
+            #                  or to duration_sec from 0 if provided.
+            if selection_type in {"time_selection", "intersection"}:
+                if time_range and len(time_range) == 2:
+                    start_s, end_s = float(time_range[0]), float(time_range[1])
+                elif duration_sec is not None:
+                    start_s, end_s = 0.0, float(duration_sec)
+                else:
+                    start_s, end_s = 0.0, float(len(data) / sr)
+
+                start_s = max(0.0, start_s)
+                end_s = max(start_s, end_s)
+
+                start_i = int(round(start_s * sr))
+                end_i = int(round(end_s * sr))
+                end_i = min(end_i, len(data))
+                start_i = min(start_i, end_i)
+
+                data = data[start_i:end_i]
+
             for stem_name in stems:
                 stem_path = output_dir / f"{input_audio.stem}_{stem_name}.wav"
                 stem_data = data * 0.5

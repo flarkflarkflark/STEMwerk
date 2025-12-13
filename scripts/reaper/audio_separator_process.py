@@ -38,10 +38,79 @@ import argparse
 import json
 from pathlib import Path
 
+
+class _TeeTextIO:
+    def __init__(self, *streams):
+        self._streams = [s for s in streams if s is not None]
+
+    def write(self, s):
+        for st in self._streams:
+            try:
+                st.write(s)
+            except Exception:
+                pass
+        return len(s)
+
+    def flush(self):
+        for st in self._streams:
+            try:
+                st.flush()
+            except Exception:
+                pass
+
+
+_progress_file = None
+
+
+def _setup_reaper_io(output_dir: str | None):
+    """If output_dir is set, write progress/log/done markers into that folder.
+
+    This lets REAPER launch Python without shell redirection (no console windows)
+    while still providing real-time progress via stdout.txt.
+    """
+    global _progress_file
+    if not output_dir:
+        return None
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    stdout_path = out / "stdout.txt"
+    stderr_path = out / "separation_log.txt"
+    done_path = out / "done.txt"
+
+    # Truncate on each run so REAPER always reads fresh progress.
+    stdout_f = open(stdout_path, "w", encoding="utf-8", buffering=1)
+    stderr_f = open(stderr_path, "w", encoding="utf-8", buffering=1)
+    _progress_file = stdout_f
+
+    # Tee stderr so CLI users still see output.
+    sys.stderr = _TeeTextIO(sys.stderr, stderr_f)
+
+    def write_done(status: str):
+        try:
+            done_path.write_text(status + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
+    return write_done
+
 def emit_progress(percent:  float, stage: str = ""):
     """Output progress in machine-readable format for C++ to parse."""
-    sys.stdout.write(f"PROGRESS:{int(percent)}:{stage}\n")
-    sys.stdout.flush()
+    line = f"PROGRESS:{int(percent)}:{stage}\n"
+    # Write to REAPER progress file if configured.
+    global _progress_file
+    if _progress_file is not None:
+        try:
+            _progress_file.write(line)
+            _progress_file.flush()
+        except Exception:
+            pass
+    # Also write to stdout for normal CLI usage.
+    try:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 def get_available_devices():
     """Get list of available compute devices."""
@@ -390,6 +459,9 @@ def main():
 
     args = parser.parse_args()
 
+    # If called from REAPER, we want progress/log/done markers in output_dir.
+    write_done = _setup_reaper_io(args.output_dir if args.output_dir else None)
+
     if args.check:
         if check_installation():
             print("\nInstallation OK!")
@@ -423,10 +495,16 @@ def main():
         output_files = separate_stems(args.input, args.output_dir, args.model, args.device)
         print(json.dumps(output_files))
 
+        if write_done:
+            write_done("DONE")
+
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
+        if write_done:
+            # Ensure REAPER doesn't hang on errors.
+            write_done("ERROR")
         sys.exit(1)
 
 if __name__ == "__main__": 
