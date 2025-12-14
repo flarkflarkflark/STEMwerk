@@ -1,0 +1,87 @@
+name: Build Installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "STEMWERK_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "STEMWERK_VERSION=0.0.0-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Windows installer (EXE)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup -y
+          $env:STEMWERK_VERSION = "${env:STEMWERK_VERSION}"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "installer\windows\STEMwerk.iss"
+
+      - name: Build macOS installer (PKG)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bash installer/macos/build_pkg.sh
+
+      - name: Build Linux installer (DEB)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync dpkg-dev
+          bash installer/linux/build_deb.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          path: |
+            installer/windows/dist/*.exe
+            installer/macos/dist/*.pkg
+            installer/linux/dist/*.deb
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all installer artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Create release if it doesn't exist
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "Automated installer build."
+          # Upload assets
+          gh release upload "$TAG" ./*.exe ./*.pkg ./*.deb --clobber

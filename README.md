@@ -152,6 +152,10 @@ The install scripts automatically:
 4. Install audio-separator package
 5. Pre-download AI models
 
+You can also download OS installers from GitHub:
+- **Releases** (recommended): contains `.exe` / `.pkg` / `.deb` assets
+- **Actions → Build Installers**: contains per-run artifacts
+
 ### GPU Acceleration
 
 | GPU | Support | Speed Improvement |

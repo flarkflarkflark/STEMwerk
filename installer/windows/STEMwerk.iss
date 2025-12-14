@@ -1,0 +1,47 @@
+#define MyAppName "STEMwerk"
+#define MyAppPublisher "flarkAUDIO"
+#define MyAppURL "https://github.com/flarkflarkflark/STEMwerk"
+
+; Version comes from env in CI (fallback to 0.0.0 locally)
+#define MyAppVersion GetEnv('STEMWERK_VERSION')
+#if MyAppVersion == ""
+  #define MyAppVersion "0.0.0"
+#endif
+
+[Setup]
+AppId={{9A6BDA0D-6A2A-4B36-9C3B-1D4C77E5D0A3}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}
+AppUpdatesURL={#MyAppURL}
+DefaultDirName={userdocs}\STEMwerk
+DefaultGroupName=STEMwerk
+DisableProgramGroupPage=yes
+OutputDir=dist
+OutputBaseFilename=STEMwerk-Setup-{#MyAppVersion}
+Compression=lzma
+SolidCompression=yes
+WizardStyle=modern
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Files]
+; Core files needed to run in REAPER
+Source: "..\..\scripts\reaper\*"; DestDir: "{app}\scripts\reaper"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\..\i18n\*"; DestDir: "{app}\i18n"; Flags: recursesubdirs createallsubdirs ignoreversion
+
+; Helpful docs
+Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\TODO.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\INTEGRATION.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\TESTING.md"; DestDir: "{app}"; Flags: ignoreversion
+
+[Icons]
+Name: "{userprograms}\STEMwerk\Open install folder"; Filename: "{app}"
+Name: "{userprograms}\STEMwerk\README"; Filename: "{app}\README.md"
+
+[Run]
+Filename: "{app}\README.md"; Description: "Open README"; Flags: postinstall shellexec skipifsilent

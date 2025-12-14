@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+OUT_DIR="$ROOT_DIR/installer/linux/dist"
+BUILD_DIR="$ROOT_DIR/installer/linux/build"
+PKG_ROOT="$BUILD_DIR/root"
+
+VERSION="${STEMWERK_VERSION:-0.0.0}"
+ARCH="${STEMWERK_DEB_ARCH:-amd64}"
+
+rm -rf "$OUT_DIR" "$BUILD_DIR"
+mkdir -p "$OUT_DIR" "$PKG_ROOT/DEBIAN" "$PKG_ROOT/usr/share/stemwerk"
+
+# Copy only what we need
+rsync -a --delete \
+  "$ROOT_DIR/scripts/reaper" \
+  "$ROOT_DIR/i18n" \
+  "$ROOT_DIR/README.md" \
+  "$ROOT_DIR/TODO.md" \
+  "$ROOT_DIR/INTEGRATION.md" \
+  "$ROOT_DIR/TESTING.md" \
+  "$PKG_ROOT/usr/share/stemwerk/"
+
+cat > "$PKG_ROOT/DEBIAN/control" <<EOF
+Package: stemwerk
+Version: $VERSION
+Section: sound
+Priority: optional
+Architecture: $ARCH
+Maintainer: flarkAUDIO <noreply@example.com>
+Description: STEMwerk REAPER scripts and helpers
+ Installs the STEMwerk REAPER scripts and helper files.
+EOF
+
+# Build deb
+DEB_FILE="$OUT_DIR/stemwerk_${VERSION}_${ARCH}.deb"
+dpkg-deb --build "$PKG_ROOT" "$DEB_FILE"
+
+echo "Built: $DEB_FILE"
