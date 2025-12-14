@@ -12,6 +12,16 @@ This file is intentionally tracked in git so "what's next" survives VS Code / Co
 - [ ] Re-test REAPER UI scaling/status
 - [x] Confirm DirectML/device options docs
 
+### REAPER UI scaling/status checklist
+
+- [ ] Open `Stemwerk: Main` and resize the window (corners + edges)
+- [ ] Verify all controls scale and remain clickable (checkboxes, presets, device/model dropdowns)
+- [ ] Verify text does not overlap or clip at small + large sizes
+- [ ] Verify progress/status area stays visible during separation
+- [ ] Verify reopening restores last window size/position (ExtState)
+- [ ] Verify focus behavior: running script again focuses existing window (unless quick preset)
+- [ ] Verify quick presets from toolbar run without showing dialog (Karaoke/Vocals/Drums/Bass/All)
+
 ## TODO
 
 Toolbar + Icons + Toolbarscripts:
