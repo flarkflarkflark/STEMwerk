@@ -11,7 +11,7 @@
 
 ## Integration with STEMwerk REAPER Script
 
-The full STEMwerk REAPER script lives in `scripts/reaper/STEMwerk_AI_Separate.lua` (12k+ lines) and contains all features:
+The full STEMwerk REAPER script lives in `scripts/reaper/STEMwerk.lua` (12k+ lines) and contains all features:
 - Cross-platform Python detection (Homebrew, Windows AppData, venv support)
 - Time selection support
 - Guitar/Piano stems (keys 5/6)
@@ -22,7 +22,7 @@ The full STEMwerk REAPER script lives in `scripts/reaper/STEMwerk_AI_Separate.lu
 
 ### Required Changes
 
-**File:** `scripts/reaper/STEMwerk_AI_Separate.lua`
+**File:** `scripts/reaper/STEMwerk.lua`
 **Area:** `loadLanguages()` (near the i18n section)
 
 **Current code:**
@@ -75,7 +75,9 @@ STEMwerk/
 │   └── stemwerk_language_wrapper.lua  # Alternative loader
 ├── scripts/
 │   └── reaper/
-│       ├── STEMwerk_AI_Separate.lua  # Main script
+│       ├── STEMwerk.lua  # Main script
+│       ├── STEMwerk_AI_Separate.lua  # Compatibility wrapper (old name)
+│       ├── STEMwerk-SETUP.lua        # Guided installer / verifier
 │       └── audio_separator_process.py
 └── tests/
     └── i18n/
@@ -138,7 +140,7 @@ end
 
 ## Next Steps
 
-1. ✅ Patch `scripts/reaper/STEMwerk_AI_Separate.lua` to load `i18n/languages.lua`
+1. ✅ Patch `scripts/reaper/STEMwerk.lua` to load `i18n/languages.lua`
 3. ⏳ Test in REAPER with sample audio
 4. ⏳ Verify language switching works
 5. ⏳ Commit and push to repository

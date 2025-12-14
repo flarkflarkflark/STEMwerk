@@ -209,6 +209,18 @@ The VST3/standalone implementation has moved to the **STEMdropper** project. His
 
 ---
 
+> **⚠️ Important**: Python 3.14+ is **NOT COMPATIBLE** with audio-separator and its dependencies (missing pre-built packages). Python 3.13 may have limited support. **Use Python 3.11 for best compatibility and AMD GPU acceleration.**
+
+### GPU Acceleration
+
+| GPU | Support | Speed Improvement | Requirements |
+|-----|---------|-------------------|--------------|
+| NVIDIA (CUDA) | ✓ Full | 10-20x faster | Python 3.9-3.12 |
+| AMD (DirectML) | ✓ Windows only | 5-10x faster | Python 3.8-3.11 |
+| AMD (ROCm) | ✓ Linux only | 10-15x faster | Python 3.9-3.12 |
+| Apple Silicon (MPS) | ✓ Native | 5-10x faster | Python 3.9-3.12 |
+| Intel/AMD (CPU) | ✓ Fallback | Baseline | Python 3.9+ |
+
 ## Output
 
 ![REAPER with Stems](docs/images/reaper-stems.png)
@@ -231,9 +243,53 @@ mysong_piano.wav     # 6-stem only
 ### "Python not found"
 Run the install script for your platform, or install Python 3.10+ manually.
 
+### Installation fails with Python 3.14+
+
+**Problem**: `diffq-fixed` or other packages fail to build with "subprocess-exited-with-error"
+
+**Cause**: Python 3.14 is too new - many AI packages don't have pre-built wheels yet
+
+**Solution**: Install Python 3.11 (recommended):
+```powershell
+winget install Python.Python.3.11
+```
+Then re-run the installer - it will automatically use Python 3.11.
+
+### "torch-directml" installation failed (AMD GPU on Windows)
+This typically means you have Python 3.12+ installed, which is not compatible with DirectML. Install Python 3.11 for AMD GPU support:
+```powershell
+winget install Python.Python.3.11
+```
+
 ### "audio-separator not found"
 ```bash
 pip install audio-separator[gpu]
+```
+
+If automatic installation fails:
+
+**Windows:**
+```cmd
+python -m pip install audio-separator[gpu]
+winget install Gyan.FFmpeg
+```
+
+**macOS:**
+```bash
+pip3 install audio-separator[gpu]
+brew install ffmpeg
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+pip3 install audio-separator[gpu]
+sudo apt install ffmpeg
+```
+
+**Linux (Arch):**
+```bash
+pip install audio-separator[gpu]
+sudo pacman -S ffmpeg
 ```
 
 ### "ffmpeg not found"

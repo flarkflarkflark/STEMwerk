@@ -3,7 +3,7 @@
     {
       "name": "karaoke_full_item",
       "description": "Remove vocals from full media item using karaoke preset",
-      "script": "STEMwerk_AI_Separate.lua",
+      "script": "STEMwerk.lua",
       "args": ["--preset", "karaoke"],
       "selection_type": "media_item",
       "expected_stems": ["drums", "bass", "other"],
@@ -19,7 +19,7 @@
     {
       "name": "vocals_only_time_selection",
       "description": "Extract vocals from 4-bar time selection",
-      "script": "STEMwerk_AI_Separate.lua",
+      "script": "STEMwerk.lua",
       "args": ["--stem", "vocals"],
       "selection_type": "time_selection",
       "time_range": [2.0, 6.0],
@@ -35,7 +35,7 @@
     {
       "name": "drums_only",
       "description": "Extract drums to new track",
-      "script": "STEMwerk_AI_Separate.lua",
+      "script": "STEMwerk.lua",
       "args": ["--stem", "drums"],
       "selection_type": "media_item",
       "expected_stems": ["drums"],
@@ -50,7 +50,7 @@
     {
       "name": "all_stems_htdemucs",
       "description": "Extract all 4 stems using htdemucs model",
-      "script": "STEMwerk_AI_Separate.lua",
+      "script": "STEMwerk.lua",
       "args": ["--model", "htdemucs", "--all-stems"],
       "selection_type": "media_item",
       "expected_stems": ["vocals", "drums", "bass", "other"],
@@ -65,7 +65,7 @@
     {
       "name": "six_stem_htdemucs_6s",
       "description": "Extract 6 stems (vocals, drums, bass, other, guitar, piano)",
-      "script": "STEMwerk_AI_Separate.lua",
+      "script": "STEMwerk.lua",
       "args": ["--model", "htdemucs_6s", "--all-stems"],
       "selection_type": "media_item",
       "expected_stems": ["vocals", "drums", "bass", "other", "guitar", "piano"],
@@ -80,7 +80,7 @@
     {
       "name": "intersection_time_and_item",
       "description": "Surgical edit: intersection of time selection and media item",
-      "script": "STEMwerk_AI_Separate.lua",
+      "script": "STEMwerk.lua",
       "args": ["--stem", "bass"],
       "selection_type": "intersection",
       "time_range": [3.0, 5.0],

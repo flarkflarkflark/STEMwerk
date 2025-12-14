@@ -182,7 +182,7 @@ Edit `tests/reaper/test_scenarios.json`:
 {
   "name": "bass_only_time_selection",
   "description": "Extract bass from 2-bar section",
-  "script": "STEMwerk_AI_Separate.lua",
+  "script": "STEMwerk.lua",
   "args": ["--stem", "bass"],
   "selection_type": "time_selection",
   "time_range": [4.0, 6.0],
