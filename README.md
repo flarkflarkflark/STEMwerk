@@ -157,6 +157,7 @@ The install scripts automatically:
 | GPU | Support | Speed Improvement |
 |-----|---------|-------------------|
 | NVIDIA (CUDA) | ✓ Full | 10-20x faster |
+| AMD (DirectML) | ✓ Windows only | 5-10x faster |
 | AMD (ROCm) | ✓ Linux only | 10-15x faster |
 | Apple Silicon (MPS) | ✓ Native | 5-10x faster |
 | Intel/AMD (CPU) | ✓ Fallback | Baseline |

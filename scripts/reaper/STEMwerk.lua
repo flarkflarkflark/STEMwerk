@@ -304,7 +304,8 @@ local DEVICES = {
     { id = "cpu", name = "CPU", desc = "Force CPU processing (slower)" },
     { id = "cuda:0", name = "GPU 0", desc = "First GPU (e.g., RX 9070)" },
     { id = "cuda:1", name = "GPU 1", desc = "Second GPU (e.g., 780M)" },
-    { id = "directml", name = "DirectML", desc = "AMD GPU via DirectML" },
+    { id = "directml:0", name = "DirectML 0", desc = "AMD GPU via DirectML (GPU 0)" },
+    { id = "directml:1", name = "DirectML 1", desc = "AMD GPU via DirectML (GPU 1)" },
 }
 
 -- Available models
