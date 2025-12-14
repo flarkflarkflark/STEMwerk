@@ -8,7 +8,7 @@
 
 ![STEMwerk Hero](docs/images/STEMwerk-hero.png)
 
-STEMwerk uses AI (Demucs/HTDemucs) to separate audio into individual stems. This repo focuses on REAPER scripts (via ReaPack). The former plugin/standalone is developed separately as STEMdropper; historical JUCE/VST files live in `legacy/`.
+STEMwerk uses AI (Demucs/HTDemucs) as a tool to separate audio into individual stems. This repo focuses on REAPER scripts (via ReaPack). The former plugin/standalone is developed separately as STEMdropper; historical JUCE/VST files live in `legacy/`.
 
 ---
 
@@ -264,6 +264,12 @@ pip install audio-separator[gpu]
 ## License
 
 MIT License - see [LICENSE](LICENSE)
+
+---
+
+## Development
+
+For the current project task list (tracked in git), see [TODO.md](TODO.md).
 
 ---
 

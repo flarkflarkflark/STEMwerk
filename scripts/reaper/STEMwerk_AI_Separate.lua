@@ -1,7 +1,8 @@
 -- @description STEMwerk
 -- @author flarkAUDIO
--- @version 1.0.0
+-- @version 2.0.0
 -- @changelog
+--   v2.0.0: i18n support + UI polish + device selection
 --   v1.0.0: Initial release
 -- @provides
 --   [main] .
@@ -42,8 +43,30 @@
 local SCRIPT_NAME = "STEMwerk"
 local EXT_SECTION = "STEMwerk"  -- For ExtState persistence (keep old name for compatibility)
 
--- Debug mode - set to true to enable debug logging
-local DEBUG_MODE = true
+-- Debug mode
+-- Default: OFF (to avoid writing logs for normal users)
+-- Enable by setting:
+--   - Environment variable: STEMWERK_DEBUG=1
+--   - REAPER ExtState: section "STEMwerk" key "debugMode" or "debug" to "1"
+local function _isTruthy(v)
+    v = tostring(v or ""):lower()
+    return v == "1" or v == "true" or v == "yes" or v == "on"
+end
+
+local function _getDebugMode()
+    if _isTruthy(os.getenv("STEMWERK_DEBUG")) then
+        return true
+    end
+    if reaper and reaper.GetExtState then
+        local v = reaper.GetExtState(EXT_SECTION, "debugMode")
+        if v ~= "" then return v == "1" end
+        v = reaper.GetExtState(EXT_SECTION, "debug")
+        if v ~= "" then return v == "1" end
+    end
+    return false
+end
+
+local DEBUG_MODE = _getDebugMode()
 local DEBUG_LOG_PATH = nil  -- Set during init
 
 local function debugLog(msg)
