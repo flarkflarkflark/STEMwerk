@@ -10,7 +10,7 @@ This file is intentionally tracked in git so "what's next" survives VS Code / Co
 - [x] Decide default DEBUG_MODE behavior
 - [x] Sanity-check Python path auto-detect
 - [ ] Re-test REAPER UI scaling/status
-- [ ] Confirm DirectML/device options docs
+- [x] Confirm DirectML/device options docs
 
 ## TODO
 
