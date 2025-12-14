@@ -332,6 +332,19 @@ To keep `TODO.md` always in sync with GitHub, run the VS Code task:
 
 (It rebases, commits only `TODO.md`, then pushes. It refuses to run if you have other uncommitted changes.)
 
+### Terminal shortcuts
+
+In a PowerShell terminal opened in this workspace, you can load helper commands:
+
+```powershell
+. .\scripts\stemwerk-terminal.ps1
+```
+
+Then you can use:
+- `taken` (show tasks / TODO.md)
+- `bewaar` (sync TODO.md to GitHub)
+- `ga-door` (git pull --rebase)
+
 ---
 
 **flarkAUDIO** - Professional Audio Tools
