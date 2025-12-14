@@ -24,10 +24,20 @@ jobs:
       - name: Set version
         shell: bash
         run: |
+          FILE_VERSION="0.0.0"
+          if [[ -f VERSION ]]; then
+            FILE_VERSION="$(tr -d '\r\n' < VERSION)"
+          fi
+
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            echo "STEMWERK_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [[ "$TAG_VERSION" != "$FILE_VERSION" ]]; then
+              echo "ERROR: tag version ($TAG_VERSION) must match VERSION file ($FILE_VERSION)." >&2
+              exit 1
+            fi
+            echo "STEMWERK_VERSION=$TAG_VERSION" >> "$GITHUB_ENV"
           else
-            echo "STEMWERK_VERSION=0.0.0-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+            echo "STEMWERK_VERSION=${FILE_VERSION}-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
           fi
 
       - name: Build Windows installer (EXE)
@@ -35,6 +45,27 @@ jobs:
         shell: pwsh
         run: |
           choco install innosetup -y
+          choco install imagemagick -y
+
+          # Generate installer icon + wizard images from SVG logo (static)
+          $assets = "installer\assets"
+          New-Item -ItemType Directory -Force -Path $assets | Out-Null
+
+          $svg = Join-Path $assets "stemwerk.svg"
+          if (Test-Path $svg) {
+            $png = Join-Path $assets "stemwerk.png"
+            & magick -background none -density 220 $svg -resize 512x512 $png
+
+            $ico = Join-Path $assets "stemwerk.ico"
+            & magick $png -define icon:auto-resize=256,128,64,48,32,16 $ico
+
+            $wiz = Join-Path $assets "stemwerk-wizard.bmp"
+            & magick -size 164x314 xc:white `(` $png -resize 140x140 `)` -gravity center -composite $wiz
+
+            $wizSmall = Join-Path $assets "stemwerk-wizard-small.bmp"
+            & magick -size 55x58 xc:white `(` $png -resize 48x48 `)` -gravity center -composite $wizSmall
+          }
+
           $env:STEMWERK_VERSION = "${env:STEMWERK_VERSION}"
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "installer\windows\STEMwerk.iss"
 
@@ -49,8 +80,10 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y rsync dpkg-dev
+          sudo apt-get install -y rsync dpkg-dev rpm
           bash installer/linux/build_deb.sh
+          bash installer/linux/build_rpm.sh
+          bash installer/linux/build_archpkg.sh
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -60,6 +93,8 @@ jobs:
             installer/windows/dist/*.exe
             installer/macos/dist/*.pkg
             installer/linux/dist/*.deb
+            installer/linux/dist/*.rpm
+            installer/linux/dist/*.pkg.tar.zst
           if-no-files-found: error
 
   release:
@@ -84,4 +119,4 @@ jobs:
           # Create release if it doesn't exist
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "Automated installer build."
           # Upload assets
-          gh release upload "$TAG" ./*.exe ./*.pkg ./*.deb --clobber
+          gh release upload "$TAG" ./*.exe ./*.pkg ./*.deb ./*.rpm ./*.pkg.tar.zst --clobber

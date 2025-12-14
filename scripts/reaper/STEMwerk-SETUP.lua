@@ -1,6 +1,6 @@
 -- @description Stemwerk: Installation & Setup
 -- @author flarkAUDIO
--- @version 1.0.0
+-- @version 2.0.0
 -- @changelog
 --   Initial guided installer / verifier (cross-platform).
 -- @link Repository https://github.com/flarkflarkflark/STEMwerk

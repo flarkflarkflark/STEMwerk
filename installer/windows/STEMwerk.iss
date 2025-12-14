@@ -16,6 +16,15 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
+#if FileExists('..\assets\stemwerk.ico')
+SetupIconFile=..\assets\stemwerk.ico
+#endif
+#if FileExists('..\assets\stemwerk-wizard.bmp')
+WizardImageFile=..\assets\stemwerk-wizard.bmp
+#endif
+#if FileExists('..\assets\stemwerk-wizard-small.bmp')
+WizardSmallImageFile=..\assets\stemwerk-wizard-small.bmp
+#endif
 DefaultDirName={userdocs}\STEMwerk
 DefaultGroupName=STEMwerk
 DisableProgramGroupPage=yes
@@ -35,6 +44,7 @@ Source: "..\..\i18n\*"; DestDir: "{app}\i18n"; Flags: recursesubdirs createallsu
 
 ; Helpful docs
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\TODO.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\INTEGRATION.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\TESTING.md"; DestDir: "{app}"; Flags: ignoreversion

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+OUT_DIR="$ROOT_DIR/installer/linux/dist"
+BUILD_DIR="$ROOT_DIR/installer/linux/build-rpm"
+RPMTOP="$BUILD_DIR/rpmbuild"
+
+VERSION="${STEMWERK_VERSION:-0.0.0}"
+
+if [[ -z "${STEMWERK_VERSION:-}" && -f "$ROOT_DIR/VERSION" ]]; then
+  VERSION="$(tr -d '\r\n' < "$ROOT_DIR/VERSION")"
+fi
+
+rm -rf "$BUILD_DIR" "$OUT_DIR"
+mkdir -p "$OUT_DIR" \
+  "$RPMTOP/BUILD" "$RPMTOP/RPMS" "$RPMTOP/SOURCES" "$RPMTOP/SPECS" "$RPMTOP/SRPMS"
+
+# Create source tarball
+SRC_DIR="$BUILD_DIR/stemwerk-$VERSION"
+mkdir -p "$SRC_DIR"
+
+rsync -a --delete \
+  "$ROOT_DIR/scripts/reaper" \
+  "$ROOT_DIR/i18n" \
+  "$ROOT_DIR/README.md" \
+  "$ROOT_DIR/LICENSE" \
+  "$ROOT_DIR/TODO.md" \
+  "$ROOT_DIR/INTEGRATION.md" \
+  "$ROOT_DIR/TESTING.md" \
+  "$SRC_DIR/"
+
+tar -C "$BUILD_DIR" -czf "$RPMTOP/SOURCES/stemwerk-$VERSION.tar.gz" "stemwerk-$VERSION"
+
+# Spec
+sed "s/@VERSION@/$VERSION/g" "$ROOT_DIR/installer/linux/rpm/stemwerk.spec" > "$RPMTOP/SPECS/stemwerk.spec"
+
+rpmbuild \
+  --define "_topdir $RPMTOP" \
+  -ba "$RPMTOP/SPECS/stemwerk.spec"
+
+# Copy RPM(s)
+find "$RPMTOP/RPMS" -type f -name "*.rpm" -maxdepth 3 -print -exec cp -f {} "$OUT_DIR/" \;
+
+echo "Built RPM(s) in: $OUT_DIR"

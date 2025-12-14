@@ -1,0 +1,14 @@
+pkgname=stemwerk
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="STEMwerk REAPER scripts and helpers"
+arch=('any')
+url="https://github.com/flarkflarkflark/STEMwerk"
+license=('MIT')
+source=("stemwerk-${pkgver}.tar.gz")
+sha256sums=('@SHA256@')
+
+package() {
+  install -dm755 "${pkgdir}/usr/share/stemwerk"
+  cp -a "${srcdir}/stemwerk-${pkgver}/"* "${pkgdir}/usr/share/stemwerk/"
+}

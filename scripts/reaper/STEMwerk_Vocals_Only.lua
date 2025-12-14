@@ -1,6 +1,6 @@
 -- @description Stemwerk: Vocals Only
 -- @author flarkAUDIO
--- @version 1.0.0
+-- @version 2.0.0
 -- @changelog
 --   Quick preset: vocals only.
 -- @link Repository https://github.com/flarkflarkflark/STEMwerk

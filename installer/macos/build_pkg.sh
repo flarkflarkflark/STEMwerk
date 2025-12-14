@@ -8,6 +8,10 @@ STAGE="$ROOT_DIR/installer/macos/build/root"
 VERSION="${STEMWERK_VERSION:-0.0.0}"
 PKG_ID="com.flarkaudio.stemwerk"
 
+if [[ -z "${STEMWERK_VERSION:-}" && -f "$ROOT_DIR/VERSION" ]]; then
+  VERSION="$(tr -d '\r\n' < "$ROOT_DIR/VERSION")"
+fi
+
 rm -rf "$OUT_DIR" "$STAGE"
 mkdir -p "$OUT_DIR" "$STAGE/Users/Shared/STEMwerk"
 
@@ -16,6 +20,7 @@ rsync -a --delete \
   "$ROOT_DIR/scripts/reaper" \
   "$ROOT_DIR/i18n" \
   "$ROOT_DIR/README.md" \
+  "$ROOT_DIR/LICENSE" \
   "$ROOT_DIR/TODO.md" \
   "$ROOT_DIR/INTEGRATION.md" \
   "$ROOT_DIR/TESTING.md" \

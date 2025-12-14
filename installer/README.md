@@ -6,7 +6,12 @@ These are **packaging helpers** so you can download installers from GitHub and t
 
 - Windows: `STEMwerk-Setup-<version>.exe` (Inno Setup)
 - macOS: `STEMwerk-<version>.pkg` (pkgbuild)
-- Linux: `stemwerk_<version>_amd64.deb` (dpkg-deb)
+- Linux (Debian/Ubuntu): `stemwerk_<version>_amd64.deb` (dpkg-deb)
+- Linux (Fedora/RHEL/openSUSE): `stemwerk-<version>-1.noarch.rpm` (rpmbuild)
+- Linux (Arch): `stemwerk-<version>-1-any.pkg.tar.zst` (makepkg)
+
+The canonical release version is stored in the repo root `VERSION` file.
+For release tags, the workflow enforces: tag `vX.Y.Z` must match `VERSION`.
 
 ## Install locations
 
@@ -23,8 +28,16 @@ The REAPER Lua scripts live under `scripts/reaper/` inside the installed folder.
 - Run ISCC on `installer/windows/STEMwerk.iss`
 
 ### macOS
-- `STEMWERK_VERSION=0.0.0 bash installer/macos/build_pkg.sh`
+- `STEMWERK_VERSION=$(cat VERSION) bash installer/macos/build_pkg.sh`
 
 ### Linux (Debian/Ubuntu)
 - `sudo apt-get install -y rsync dpkg-dev`
-- `STEMWERK_VERSION=0.0.0 bash installer/linux/build_deb.sh`
+- `STEMWERK_VERSION=$(cat VERSION) bash installer/linux/build_deb.sh`
+
+### Linux (RPM)
+- Install `rpm` / `rpmbuild` (package name varies per distro)
+- `STEMWERK_VERSION=$(cat VERSION) bash installer/linux/build_rpm.sh`
+
+### Linux (Arch)
+- Requires Docker (build runs inside `archlinux:latest`)
+- `STEMWERK_VERSION=$(cat VERSION) bash installer/linux/build_archpkg.sh`

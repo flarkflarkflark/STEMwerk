@@ -9,6 +9,10 @@ PKG_ROOT="$BUILD_DIR/root"
 VERSION="${STEMWERK_VERSION:-0.0.0}"
 ARCH="${STEMWERK_DEB_ARCH:-amd64}"
 
+if [[ -z "${STEMWERK_VERSION:-}" && -f "$ROOT_DIR/VERSION" ]]; then
+  VERSION="$(tr -d '\r\n' < "$ROOT_DIR/VERSION")"
+fi
+
 rm -rf "$OUT_DIR" "$BUILD_DIR"
 mkdir -p "$OUT_DIR" "$PKG_ROOT/DEBIAN" "$PKG_ROOT/usr/share/stemwerk"
 
@@ -17,6 +21,7 @@ rsync -a --delete \
   "$ROOT_DIR/scripts/reaper" \
   "$ROOT_DIR/i18n" \
   "$ROOT_DIR/README.md" \
+  "$ROOT_DIR/LICENSE" \
   "$ROOT_DIR/TODO.md" \
   "$ROOT_DIR/INTEGRATION.md" \
   "$ROOT_DIR/TESTING.md" \
@@ -29,6 +34,7 @@ Section: sound
 Priority: optional
 Architecture: $ARCH
 Maintainer: flarkAUDIO <noreply@example.com>
+Homepage: https://github.com/flarkflarkflark/STEMwerk
 Description: STEMwerk REAPER scripts and helpers
  Installs the STEMwerk REAPER scripts and helper files.
 EOF
