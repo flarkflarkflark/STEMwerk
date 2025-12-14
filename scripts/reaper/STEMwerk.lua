@@ -60,6 +60,41 @@ local function isAbsolutePath(p)
     return false
 end
 
+local function fileExists(path)
+    if not path or path == "" then return false end
+    local f = io.open(path, "r")
+    if f then f:close(); return true end
+    return false
+end
+
+local function quoteArg(s)
+    s = tostring(s)
+    if s:find('"') then
+        s = s:gsub('"', '\\"')
+    end
+    if s:find("%s") then
+        return '"' .. s .. '"'
+    end
+    return s
+end
+
+local function execProcess(cmd, timeoutMs)
+    timeoutMs = timeoutMs or 8000
+    if reaper and reaper.ExecProcess then
+        local rc, out = reaper.ExecProcess(cmd, timeoutMs)
+        return tonumber(rc) or -1, out or ""
+    end
+    local ok = os.execute(cmd)
+    return (ok == true or ok == 0) and 0 or 1, ""
+end
+
+local function canRunPython(pythonCmd)
+    if not pythonCmd or pythonCmd == "" then return false end
+    local cmd = quoteArg(pythonCmd) .. ' -c "import sys; print(sys.version_info[0])"'
+    local rc = execProcess(cmd, 12000)
+    return rc == 0
+end
+
 -- Debug mode
 -- Default: OFF (to avoid writing logs for normal users)
 -- Enable by setting:
@@ -145,11 +180,16 @@ end
 local function findPython()
     local override = getExtStateValue("pythonPath")
     if override then
-        if not isAbsolutePath(override) then
+        local resolved = override
+        if not isAbsolutePath(resolved) then
             -- Allow relative overrides (relative to this script folder)
-            override = script_path .. override
+            resolved = script_path .. resolved
         end
-        return override
+
+        if (isAbsolutePath(resolved) and fileExists(resolved) and canRunPython(resolved)) or (not isAbsolutePath(resolved) and canRunPython(resolved)) then
+            return resolved
+        end
+        debugLog("pythonPath override not runnable: " .. tostring(resolved))
     end
 
     local paths = {}
@@ -166,9 +206,19 @@ local function findPython()
         table.insert(paths, script_path .. "..\\..\\..\\venv\\Scripts\\python.exe")
         -- Standard Python locations
         local localAppData = os.getenv("LOCALAPPDATA") or ""
-        table.insert(paths, localAppData .. "\\Programs\\Python\\Python312\\python.exe")
         table.insert(paths, localAppData .. "\\Programs\\Python\\Python311\\python.exe")
         table.insert(paths, localAppData .. "\\Programs\\Python\\Python310\\python.exe")
+        table.insert(paths, localAppData .. "\\Programs\\Python\\Python312\\python.exe")
+        -- Program Files (system installs)
+        local programFiles = os.getenv("ProgramFiles") or "C:\\Program Files"
+        local programFilesX86 = os.getenv("ProgramFiles(x86)") or "C:\\Program Files (x86)"
+        table.insert(paths, programFiles .. "\\Python311\\python.exe")
+        table.insert(paths, programFiles .. "\\Python310\\python.exe")
+        table.insert(paths, programFilesX86 .. "\\Python311\\python.exe")
+        table.insert(paths, programFilesX86 .. "\\Python310\\python.exe")
+        -- Windows Store/App Execution Alias (if enabled)
+        table.insert(paths, localAppData .. "\\Microsoft\\WindowsApps\\python.exe")
+        table.insert(paths, localAppData .. "\\Microsoft\\WindowsApps\\python3.exe")
         table.insert(paths, "python")
     else
         -- Linux/macOS paths - check venvs first
@@ -180,6 +230,8 @@ local function findPython()
         -- Homebrew on macOS
         if OS == "macOS" then
             table.insert(paths, "/opt/homebrew/bin/python3")
+            table.insert(paths, "/usr/local/bin/python3")
+            table.insert(paths, "/usr/local/opt/python@3.11/bin/python3")
             table.insert(paths, "/usr/local/opt/python@3.12/bin/python3")
         end
         -- User local and system paths
@@ -191,32 +243,37 @@ local function findPython()
     end
 
     for _, p in ipairs(paths) do
-        local f = io.open(p, "r")
-        if f then f:close(); return p end
+        if p == "python" or p == "python3" then
+            if canRunPython(p) then return p end
+        else
+            if fileExists(p) and canRunPython(p) then return p end
+        end
     end
-    return OS == "Windows" and "python" or "python3"
+
+    local fallback = OS == "Windows" and "python" or "python3"
+    return fallback
 end
 
 local function findSeparatorScript()
     local override = getExtStateValue("separatorScript")
     if override then
-        if not isAbsolutePath(override) then
-            override = script_path .. override
+        local resolved = override
+        if not isAbsolutePath(resolved) then
+            resolved = script_path .. resolved
         end
-        return override
+        if fileExists(resolved) then
+            return resolved
+        end
+        debugLog("separatorScript override not found: " .. tostring(resolved))
     end
 
     local home = getHome()
     local paths = {
         script_path .. "audio_separator_process.py",
-        script_path .. ".." .. PATH_SEP .. "" .. PATH_SEP .. "audio_separator_process.py",
-        script_path .. ".." .. PATH_SEP .. "" .. PATH_SEP .. "Source" .. PATH_SEP .. "" .. PATH_SEP .. "audio_separator_process.py",
         home .. PATH_SEP .. "Documents" .. PATH_SEP .. "STEMwerk" .. PATH_SEP .. "scripts" .. PATH_SEP .. "reaper" .. PATH_SEP .. "audio_separator_process.py",
-        home .. PATH_SEP .. "Documents" .. PATH_SEP .. "STEMwerk" .. PATH_SEP .. "Source" .. PATH_SEP .. "" .. PATH_SEP .. "audio_separator_process.py",
     }
     for _, p in ipairs(paths) do
-        local f = io.open(p, "r")
-        if f then f:close(); return p end
+        if fileExists(p) then return p end
     end
     return script_path .. "audio_separator_process.py"
 end

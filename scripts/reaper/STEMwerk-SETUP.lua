@@ -69,7 +69,18 @@ end
 local function detectPython()
     local configured = reaper.GetExtState(EXT_SECTION, "pythonPath")
     if configured ~= "" then
-        return configured
+        -- Verify configured python is runnable before trusting it
+        local v = nil
+        v = (select(1, (function()
+            local version = nil
+            local cmd = quoteArg(configured) .. ' -c "import sys; print(f\\"{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}\\")"'
+            local rc = select(1, exec(cmd, 12000))
+            if rc == 0 then version = "ok" end
+            return version
+        end)()))
+        if v then
+            return configured
+        end
     end
 
     local scriptDir = getScriptDir()
@@ -79,13 +90,29 @@ local function detectPython()
 
     if OS == "Windows" then
         local localAppData = os.getenv("LOCALAPPDATA") or ""
+        local programFiles = os.getenv("ProgramFiles") or "C:\\Program Files"
+        local programFilesX86 = os.getenv("ProgramFiles(x86)") or "C:\\Program Files (x86)"
+
         -- Prefer common Python installs
         table.insert(candidates, localAppData .. "\\Programs\\Python\\Python311\\python.exe")
         table.insert(candidates, localAppData .. "\\Programs\\Python\\Python310\\python.exe")
         table.insert(candidates, localAppData .. "\\Programs\\Python\\Python312\\python.exe")
+
+        -- System installs
+        table.insert(candidates, programFiles .. "\\Python311\\python.exe")
+        table.insert(candidates, programFiles .. "\\Python310\\python.exe")
+        table.insert(candidates, programFilesX86 .. "\\Python311\\python.exe")
+        table.insert(candidates, programFilesX86 .. "\\Python310\\python.exe")
+
+        -- Windows Store aliases (if enabled)
+        table.insert(candidates, localAppData .. "\\Microsoft\\WindowsApps\\python.exe")
+        table.insert(candidates, localAppData .. "\\Microsoft\\WindowsApps\\python3.exe")
+
         -- Repo/portable venv patterns (best-effort)
         table.insert(candidates, scriptDir .. "..\\..\\.venv\\Scripts\\python.exe")
         table.insert(candidates, home .. "\\Documents\\STEMwerk\\.venv\\Scripts\\python.exe")
+
+        -- PATH fallback
         -- Fallback
         table.insert(candidates, "python")
     else
@@ -94,6 +121,8 @@ local function detectPython()
         if OS == "macOS" then
             table.insert(candidates, "/opt/homebrew/bin/python3")
             table.insert(candidates, "/usr/local/bin/python3")
+            table.insert(candidates, "/usr/local/opt/python@3.11/bin/python3")
+            table.insert(candidates, "/usr/local/opt/python@3.12/bin/python3")
         end
         table.insert(candidates, "/usr/bin/python3")
         table.insert(candidates, "python3")
@@ -102,10 +131,13 @@ local function detectPython()
 
     for _, p in ipairs(candidates) do
         if p == "python" or p == "python3" then
-            return p
-        end
-        if fileExists(p) then
-            return p
+            local v = select(1, getPythonVersion(p))
+            if v then return p end
+        else
+            if fileExists(p) then
+                local v = select(1, getPythonVersion(p))
+                if v then return p end
+            end
         end
     end
 
