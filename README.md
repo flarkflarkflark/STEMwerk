@@ -327,6 +327,11 @@ MIT License - see [LICENSE](LICENSE)
 
 For the current project task list (tracked in git), see [TODO.md](TODO.md).
 
+To keep `TODO.md` always in sync with GitHub, run the VS Code task:
+- `STEMwerk: Sync TODO.md`
+
+(It rebases, commits only `TODO.md`, then pushes. It refuses to run if you have other uncommitted changes.)
+
 ---
 
 **flarkAUDIO** - Professional Audio Tools
