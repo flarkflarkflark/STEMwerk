@@ -12,6 +12,12 @@ This file is intentionally tracked in git so "what's next" survives VS Code / Co
 - [ ] Re-test REAPER UI scaling/status
 - [x] Confirm DirectML/device options docs
 
+- [ ] ASAP: Build downloadable installers for testing on macOS + Windows + Linux
+	- Goal: download from GitHub (Releases/Artifacts), install, and run setup + REAPER scripts
+	- Windows: .msi or .exe
+	- macOS: .pkg
+	- Linux: AppImage and/or .deb
+
 ### REAPER UI scaling/status checklist
 
 - [ ] Open `Stemwerk: Main` and resize the window (corners + edges)
@@ -38,7 +44,4 @@ Toolbar + Icons + Toolbarscripts:
 
 ## Future
 
-- OS-level installer for non-REAPER / inexperienced users (guided install outside REAPER)
-	- Windows: .msi or .exe installer
-	- macOS: .pkg installer
-	- Linux: distro-friendly package (e.g. .deb/.rpm) or AppImage
+- (After installers exist) Add “novice mode” UX: guided install outside REAPER, minimal prompts, clear GPU choice
