@@ -1,0 +1,41 @@
+{
+  "platform": "Windows",
+  "python": "3.10.19",
+  "torch": "2.5.1",
+  "tests": [
+    {
+      "device": "cpu",
+      "reps": 3,
+      "size": 1024,
+      "times": [
+        0.026019573211669922,
+        0.029939889907836914,
+        0.01548004150390625
+      ],
+      "median_s": 0.026019573211669922,
+      "ok": true
+    },
+    {
+      "device": "cuda:0",
+      "reps": 3,
+      "size": 1024,
+      "times": [
+        0.017856121063232422,
+        0.014966487884521484,
+        0.015076160430908203
+      ],
+      "median_s": 0.015076160430908203,
+      "ok": true
+    },
+    {
+      "device": "mps",
+      "ok": false,
+      "reason": "no_mps"
+    },
+    {
+      "device": "dml",
+      "ok": false,
+      "reason": "torch_directml_not_installed"
+    }
+  ]
+}
