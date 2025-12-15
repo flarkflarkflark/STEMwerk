@@ -90,7 +90,8 @@ $br = Join-Path $RepoRoot 'tests\bench_results'
 if (-not (Test-Path $br)) { New-Item -ItemType Directory -Path $br | Out-Null }
 
 # Run warmup + stress for each size
-$sizesArr = $Sizes -split ',' | ForEach-Object { [int]$_ }
+# Fix: Accept both comma and space separated values for $Sizes
+$sizesArr = $Sizes -replace ',', ' ' -split '\s+' | ForEach-Object { [int]$_ }
 foreach ($s in $sizesArr) {
     Write-Host "Running warmup size=$s"
     python tools/warmup.py --iterations 5 --size $s
@@ -100,12 +101,15 @@ foreach ($s in $sizesArr) {
 
 # Regenerate labeled plot if mapping present
 $mapf = Join-Path $br 'device_mapping.json'
-if (Test-Path $mapf) {
+$plotData = Join-Path $br 'stress_plot_data.csv'
+if (Test-Path $mapf -and (Test-Path $plotData)) {
     Write-Host "Generating labeled plot..."
     python tools/plot_with_labels.py
-} else {
+} elseif (Test-Path $plotData) {
     Write-Host "No device mapping found; generating default plot..."
     python tools/plot_stress_results.py
+} else {
+    Write-Warning "Plot data not found: $plotData. Skipping plot generation."
 }
 
 # Commit & push results if requested
