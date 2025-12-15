@@ -12,6 +12,8 @@ This file is intentionally tracked in git so "what's next" survives VS Code / Co
 - [ ] Re-test REAPER UI scaling/status
 - [x] Confirm DirectML/device options docs
 
+- [ ] REAPER UI: merge language/day-night/FX into 1 icon + add TT (tooltips) toggle
+
 - [ ] ASAP: Build downloadable installers for testing on macOS + Windows + Linux
 	- Goal: download from GitHub (Releases/Artifacts), install, and run setup + REAPER scripts
 	- Windows: .msi or .exe

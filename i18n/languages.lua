@@ -79,6 +79,7 @@ local LANGUAGES = {
         -- Tooltips
         switch_dark = "Switch to dark mode",
         switch_light = "Switch to light mode",
+        tooltip_quick_settings = "Quick settings",
         click_to_stemperate = "Click to STEMwerk",
         double_click_reset = "Double-click to reset",
         tooltip_change_language = "Click to change language",
@@ -98,6 +99,11 @@ local LANGUAGES = {
         tooltip_close = "Close STEMwerk (ESC)",
         tooltip_parallel = "Process multiple tracks simultaneously (uses more GPU memory)",
         tooltip_sequential = "Process tracks one at a time (slower but uses less memory)",
+
+        -- Quick settings menu
+        menu_dark_mode = "Dark mode",
+        menu_visual_fx = "Visual FX",
+        menu_tooltips = "Tooltips",
 
         -- Model descriptions
         model_fast_desc = "htdemucs - Fastest model, good quality (4 stems)",
@@ -182,10 +188,12 @@ local LANGUAGES = {
         help_step3_desc = "Wait for AI to separate your audio",
         help_step3_detail = "Click the STEMwerk button and watch the AI work its magic!",
         help_pro_tip = "Pro Tip: Use the 6-stem model (htdemucs_6s) for guitar and piano separation!",
-        keyboard_shortcuts = "Keyboard Shortcuts:",
+        tips_hints = "Tips",
         open_help = "Open Help",
         close_cancel = "Close / Cancel",
         start_stemwerk = "Start STEMwerk",
+
+        -- mouse_options removed (not shown)
 
         -- Stems tab
         help_stems_title = "About Stems",
@@ -291,6 +299,7 @@ local LANGUAGES = {
         -- Tooltips
         switch_dark = "Schakel naar donkere modus",
         switch_light = "Schakel naar lichte modus",
+        tooltip_quick_settings = "Snelle instellingen",
         click_to_stemperate = "Klik om STEMwerk te starten",
         double_click_reset = "Dubbelklik om te resetten",
         tooltip_change_language = "Klik om taal te wijzigen",
@@ -310,6 +319,11 @@ local LANGUAGES = {
         tooltip_close = "Sluit STEMwerk (ESC)",
         tooltip_parallel = "Verwerk meerdere tracks tegelijk (gebruikt meer GPU geheugen)",
         tooltip_sequential = "Verwerk tracks een voor een (langzamer maar minder geheugen)",
+
+        -- Quick settings menu
+        menu_dark_mode = "Donkere modus",
+        menu_visual_fx = "Visuele FX",
+        menu_tooltips = "Tooltips",
 
         -- Model descriptions
         model_fast_desc = "htdemucs - Snelste model, goede kwaliteit (4 stems)",
@@ -503,6 +517,7 @@ local LANGUAGES = {
         -- Tooltips
         switch_dark = "Zum Dunkelmodus wechseln",
         switch_light = "Zum Hellmodus wechseln",
+        tooltip_quick_settings = "Schnelle Einstellungen",
         click_to_stemperate = "Klicken zum STEMwerk",
         double_click_reset = "Doppelklick zum Zuruecksetzen",
         tooltip_change_language = "Klicken um Sprache zu aendern",
@@ -522,6 +537,11 @@ local LANGUAGES = {
         tooltip_close = "STEMwerk schliessen (ESC)",
         tooltip_parallel = "Mehrere Tracks gleichzeitig verarbeiten (braucht mehr GPU Speicher)",
         tooltip_sequential = "Tracks einzeln verarbeiten (langsamer aber weniger Speicher)",
+
+        -- Quick settings menu
+        menu_dark_mode = "Dunkelmodus",
+        menu_visual_fx = "Visuelle FX",
+        menu_tooltips = "Tooltips",
 
         -- Model descriptions
         model_fast_desc = "htdemucs - Schnellstes Modell, gute Qualitaet (4 Stems)",

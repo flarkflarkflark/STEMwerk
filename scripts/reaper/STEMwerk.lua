@@ -150,6 +150,9 @@ end
 clearDebugLog()
 debugLog("Script loaded")
 
+-- FORCE DEBUG (temporary diagnostic): enable logging regardless of ExtState/env
+-- (diagnostic removed)
+
 -- Get script path for finding audio_separator_process.py
 local info = debug.getinfo(1, "S")
 local script_path = info.source:match("@?(.*[/\\])")
@@ -7667,6 +7670,7 @@ local function applyPostProcessToSelectedCandidates(mode)
 
     local totalCreated = 0
     reaper.Undo_BeginBlock()
+    reaper.PreventUIRefresh(1)
     for _, item in ipairs(itemsToProcess) do
         totalCreated = totalCreated + (explodeTakesFromItem(item, mode, true) or 0)
     end
@@ -9176,14 +9180,13 @@ local function renderTimeSelectionToWav(outputPath)
         end
     end
 
-    -- If no items selected but tracks are selected and In-place mode is on,
-    -- find items on those tracks that overlap the time selection
+    -- If no items selected but tracks are selected, find items on those tracks that overlap the time selection
     if #selectedItems == 0 then
         local selTrackCount = reaper.CountSelectedTracks(0)
         local selItemCount = reaper.CountSelectedMediaItems(0)
 
-        -- In-place mode with track selected: auto-find overlapping items on selected tracks
-        if selTrackCount > 0 and selItemCount == 0 and not SETTINGS.createNewTracks then
+        -- If tracks are selected (even when creating new tracks), auto-find overlapping items on those tracks
+        if selTrackCount > 0 and selItemCount == 0 then
             debugLog("In-place mode: finding items on selected tracks overlapping time selection")
             for t = 0, selTrackCount - 1 do
                 local track = reaper.GetSelectedTrack(0, t)
@@ -10288,38 +10291,42 @@ local function startSeparationProcess(inputFile, outputDir, model)
         local deviceArg = SETTINGS.device or "auto"
         debugLog("  device=" .. tostring(deviceArg))
 
+        -- Write a tiny VBS launcher that runs PowerShell invisibly via wscript
+        -- PowerShell will Start-Process the Python worker and write its PID to pidFile
         local vbsPath = outputDir .. PATH_SEP .. "run_hidden.vbs"
         local vbsFile = io.open(vbsPath, "w")
         if vbsFile then
-            vbsFile:write('On Error Resume Next\n')
-            vbsFile:write('Dim locator, svc, startup, pid\n')
-            vbsFile:write('Set locator = CreateObject("WbemScripting.SWbemLocator")\n')
-            vbsFile:write('Set svc = locator.ConnectServer(".", "root\\cimv2")\n')
-            vbsFile:write('Set startup = svc.Get("Win32_ProcessStartup").SpawnInstance_\n')
-            vbsFile:write('startup.ShowWindow = 0\n')
+            local function q(s) return tostring(s or "") end
+            local python = q(PYTHON_PATH)
+            local sep = q(SEPARATOR_SCRIPT)
+            local inF = q(inputFile)
+            local outD = q(outputDir)
+            local m = tostring(model)
+            local dev = tostring(deviceArg)
+            local stdoutF = stdoutFile
+            local stderrF = logFile
+            local pidF = pidFile
 
-            -- Build command line with proper quoting
-            local function q(s)
-                -- Escape for VBS string literal
-                s = tostring(s or "")
-                return s:gsub('"', '""')
-            end
+            -- Build the PowerShell command that Start-Process the Python worker and writes PID
+            local psInner = "$p = Start-Process -FilePath '" .. python .. "' -ArgumentList @('-u','" .. sep .. "','" .. inF .. "','" .. outD .. "','--model','" .. m .. "','--device','" .. dev .. "') -WindowStyle Hidden -PassThru -RedirectStandardOutput '" .. stdoutF .. "' -RedirectStandardError '" .. stderrF .. "'; Set-Content -Path '" .. pidF .. "' -Value $p.Id -Encoding ascii"
 
-            local cmd = '"' .. PYTHON_PATH .. '" -u "' .. SEPARATOR_SCRIPT .. '" ' ..
-                '"' .. inputFile .. '" "' .. outputDir .. '" --model ' .. tostring(model) .. ' --device ' .. tostring(deviceArg)
-            vbsFile:write('Dim cmd\n')
-            vbsFile:write('cmd = "' .. q(cmd) .. '"\n')
-            vbsFile:write('pid = 0\n')
-            vbsFile:write('svc.Get("Win32_Process").Create cmd, Null, startup, pid\n')
-            vbsFile:write('CreateObject("Scripting.FileSystemObject").CreateTextFile("' .. q(pidFile) .. '", True).WriteLine pid\n')
+            -- VBS: create shell and run PowerShell command invisibly (0 = hidden window)
+            vbsFile:write('Set sh = CreateObject("WScript.Shell")\n')
+            vbsFile:write('cmd = "powershell -NoProfile -ExecutionPolicy Bypass -Command ""' .. psInner .. '"""\n')
+            vbsFile:write('sh.Run cmd, 0, False\n')
             vbsFile:close()
         end
 
+        local wscriptCmd = 'wscript "' .. vbsPath .. '"'
         if reaper.ExecProcess then
-            reaper.ExecProcess('wscript "' .. vbsPath .. '"', -1)
+            debugLog('Calling reaper.ExecProcess: ' .. wscriptCmd)
+            reaper.ExecProcess(wscriptCmd, -1)
+            debugLog('reaper.ExecProcess called')
         else
-            local handle = io.popen('wscript "' .. vbsPath .. '"')
+            debugLog('Calling io.popen for: ' .. wscriptCmd)
+            local handle = io.popen(wscriptCmd)
             if handle then handle:close() end
+            debugLog('io.popen returned')
         end
     else
         -- Unix: run in background
@@ -10328,6 +10335,7 @@ local function startSeparationProcess(inputFile, outputDir, model)
             '"%s" -u "%s" "%s" "%s" --model %s --device %s >"%s" 2>"%s" && echo DONE > "%s/done.txt" &',
             PYTHON_PATH, SEPARATOR_SCRIPT, inputFile, outputDir, model, deviceArg, stdoutFile, logFile, outputDir
         )
+        -- diagnostic launcher file removed
         os.execute(cmd)
     end
 end
@@ -10784,11 +10792,16 @@ explodeTakesFromItem = function(item, mode, skipUndo)
         reaper.DeleteTrackMediaItem(track, item)
 
     elseif mode == "explode_in_place" or mode == "explode_in_order" then
+        -- Collect original take names so we can create a combined "Exploded A + B + C" label
+        local explodedNames = {}
+        local newTakes = {}
+        local newItems = {}
         for t = 0, takeCount - 1 do
             local take = reaper.GetTake(item, t)
             if take then
                 local _, takeName = reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", "", false)
                 if not takeName or takeName == "" then takeName = "Take " .. tostring(t + 1) end
+                table.insert(explodedNames, takeName)
                 local takeColor = reaper.GetMediaItemTakeInfo_Value(take, "I_CUSTOMCOLOR")
 
                 local newItem = reaper.AddMediaItemToTrack(track)
@@ -10804,15 +10817,37 @@ explodeTakesFromItem = function(item, mode, skipUndo)
                     local newTake = reaper.AddTakeToMediaItem(newItem)
                     if newTake then
                         reaper.SetMediaItemTake_Source(newTake, reaper.GetMediaItemTake_Source(take))
+                        -- Use the original take name for each new take (temporary)
                         reaper.GetSetMediaItemTakeInfo_String(newTake, "P_NAME", takeName, true)
                         if takeColor and takeColor ~= 0 then
                             reaper.SetMediaItemTakeInfo_Value(newTake, "I_CUSTOMCOLOR", takeColor)
                             reaper.SetMediaItemInfo_Value(newItem, "I_CUSTOMCOLOR", takeColor)
                         end
+                        table.insert(newTakes, newTake)
+                        table.insert(newItems, newItem)
                         created = created + 1
                     end
                 end
             end
+        end
+        -- Name all created takes/items with a combined exploded label so Arrange shows it
+        if #newTakes > 0 and #explodedNames > 0 then
+            local combined = table.concat(explodedNames, " + ")
+            local combinedName = "Exploded " .. combined
+            for idx, nt in ipairs(newTakes) do
+                if reaper.GetSetMediaItemTakeInfo_String then
+                    reaper.GetSetMediaItemTakeInfo_String(nt, "P_NAME", combinedName, true)
+                end
+                local ni = newItems[idx]
+                if ni and reaper.GetSetMediaItemInfo_String then
+                    reaper.GetSetMediaItemInfo_String(ni, "P_NAME", combinedName, true)
+                end
+            end
+            if newItems[1] then
+                reaper.Main_OnCommand(40289, 0) -- Unselect all items
+                reaper.SetMediaItemSelected(newItems[1], true)
+            end
+            reaper.UpdateArrange()
         end
 
         -- Remove the original multi-take item
@@ -11071,70 +11106,178 @@ end
 local function createStemTracksForSelection(stemPaths, selPos, selLen, sourceTrack)
     reaper.Undo_BeginBlock()
 
-    -- Get reference track: use provided sourceTrack, or first selected track, or track 0
-    local refTrack = sourceTrack or reaper.GetSelectedTrack(0, 0) or reaper.GetTrack(0, 0)
-    local trackIdx = 0
-    if refTrack then
-        trackIdx = math.floor(reaper.GetMediaTrackInfo_Value(refTrack, "IP_TRACKNUMBER"))
-    end
-
-    local selectedCount = 0
-    for _, stem in ipairs(STEMS) do
-        if stem.selected and stemPaths[stem.name:lower()] then selectedCount = selectedCount + 1 end
-    end
-
-    -- Get source track name for stem naming
-    local folderTrack = nil
-    local sourceName = "Selection"
-    if refTrack then
-        local _, trackName = reaper.GetTrackName(refTrack)
-        if trackName and trackName ~= "" then
-            sourceName = trackName
+    -- If there is a time-selection and selected items overlap it, create a set
+    -- of stem tracks directly under each source track for each such selected item.
+    local itemsToProcess = {}
+    -- Prefer items on the provided sourceTrack (this function is called per-job).
+    if sourceTrack and reaper.ValidatePtr(sourceTrack, "MediaTrack*") then
+        local startSel = selPos
+        local endSel = selPos + selLen
+        local numItems = reaper.CountTrackMediaItems(sourceTrack)
+        local foundSelected = false
+        -- First pass: selected items on this track that overlap selection
+        for i = 0, numItems - 1 do
+            local it = reaper.GetTrackMediaItem(sourceTrack, i)
+            if it and reaper.ValidatePtr(it, "MediaItem*") then
+                local ipos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+                local ilen = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
+                local iend = ipos + ilen
+                if ipos < endSel and iend > startSel and reaper.IsMediaItemSelected(it) then
+                    foundSelected = true
+                    table.insert(itemsToProcess, {item = it, pos = ipos, len = ilen})
+                end
+            end
         end
-    end
-    if SETTINGS.createFolder then
-        reaper.InsertTrackAtIndex(trackIdx, true)
-        folderTrack = reaper.GetTrack(0, trackIdx)
-        reaper.GetSetMediaTrackInfo_String(folderTrack, "P_NAME", sourceName .. " - Stems", true)
-        reaper.SetMediaTrackInfo_Value(folderTrack, "I_FOLDERDEPTH", 1)
-        reaper.SetMediaTrackInfo_Value(folderTrack, "I_CUSTOMCOLOR", rgbToReaperColor(180, 140, 200))
-        trackIdx = trackIdx + 1
-    end
-
-    local importedCount = 0
-    for _, stem in ipairs(STEMS) do
-        if stem.selected then
-            local stemPath = stemPaths[stem.name:lower()]
-            if stemPath then
-                reaper.InsertTrackAtIndex(trackIdx + importedCount, true)
-                local newTrack = reaper.GetTrack(0, trackIdx + importedCount)
-
-                local newTrackName = selectedCount == 1 and (stem.name .. " - " .. sourceName) or (sourceName .. " - " .. stem.name)
-                reaper.GetSetMediaTrackInfo_String(newTrack, "P_NAME", newTrackName, true)
-
-                local color = rgbToReaperColor(stem.color[1], stem.color[2], stem.color[3])
-                reaper.SetMediaTrackInfo_Value(newTrack, "I_CUSTOMCOLOR", color)
-
-                local newItem = reaper.AddMediaItemToTrack(newTrack)
-                reaper.SetMediaItemInfo_Value(newItem, "D_POSITION", selPos)
-                reaper.SetMediaItemInfo_Value(newItem, "D_LENGTH", selLen)
-
-                local newTake = reaper.AddTakeToMediaItem(newItem)
-                reaper.SetMediaItemTake_Source(newTake, reaper.PCM_Source_CreateFromFile(stemPath))
-                reaper.GetSetMediaItemTakeInfo_String(newTake, "P_NAME", stem.name, true)
-                reaper.SetMediaItemInfo_Value(newItem, "I_CUSTOMCOLOR", color)
-
-                importedCount = importedCount + 1
+        -- Second pass: if no selected items, include ANY overlapping items on this track
+        if not foundSelected then
+            for i = 0, numItems - 1 do
+                local it = reaper.GetTrackMediaItem(sourceTrack, i)
+                if it and reaper.ValidatePtr(it, "MediaItem*") then
+                    local ipos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+                    local ilen = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
+                    local iend = ipos + ilen
+                    if ipos < endSel and iend > startSel then
+                        table.insert(itemsToProcess, {item = it, pos = ipos, len = ilen})
+                    end
+                end
+            end
+        end
+    else
+        -- Fallback: global selected items overlapping selection
+        for i = 0, reaper.CountSelectedMediaItems(0)-1 do
+            local it = reaper.GetSelectedMediaItem(0, i)
+            if it and reaper.ValidatePtr(it, "MediaItem*") then
+                local ipos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+                local ilen = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
+                local iend = ipos + ilen
+                local selEnd = selPos + selLen
+                if not (iend <= selPos or ipos >= selEnd) then
+                    table.insert(itemsToProcess, {item = it, pos = ipos, len = ilen})
+                end
             end
         end
     end
 
-    if folderTrack and importedCount > 0 then
-        reaper.SetMediaTrackInfo_Value(reaper.GetTrack(0, trackIdx + importedCount - 1), "I_FOLDERDEPTH", -1)
+    -- If no selected items overlap the time selection, fall back to single-set behaviour
+    if #itemsToProcess == 0 then
+        -- Fall back to creating tracks at selection position under provided sourceTrack
+        local refTrack = sourceTrack or reaper.GetSelectedTrack(0, 0) or reaper.GetTrack(0, 0)
+        local trackIdx = 0
+        if refTrack then trackIdx = math.floor(reaper.GetMediaTrackInfo_Value(refTrack, "IP_TRACKNUMBER")) end
+
+        local selectedCount = 0
+        for _, stem in ipairs(STEMS) do if stem.selected and stemPaths[stem.name:lower()] then selectedCount = selectedCount + 1 end end
+
+        local folderTrack = nil
+        local sourceName = "Selection"
+        if refTrack then local _, tn = reaper.GetTrackName(refTrack) if tn and tn ~= "" then sourceName = tn end end
+        if SETTINGS.createFolder then
+            reaper.InsertTrackAtIndex(trackIdx, true)
+            folderTrack = reaper.GetTrack(0, trackIdx)
+            reaper.GetSetMediaTrackInfo_String(folderTrack, "P_NAME", sourceName .. " - Stems", true)
+            reaper.SetMediaTrackInfo_Value(folderTrack, "I_FOLDERDEPTH", 1)
+            reaper.SetMediaTrackInfo_Value(folderTrack, "I_CUSTOMCOLOR", rgbToReaperColor(180, 140, 200))
+            trackIdx = trackIdx + 1
+        end
+
+        local importedCount = 0
+        for _, stem in ipairs(STEMS) do
+            if stem.selected then
+                local stemPath = stemPaths[stem.name:lower()]
+                if stemPath then
+                    reaper.InsertTrackAtIndex(trackIdx + importedCount, true)
+                    local newTrack = reaper.GetTrack(0, trackIdx + importedCount)
+                    local newTrackName = selectedCount == 1 and (stem.name .. " - " .. sourceName) or (sourceName .. " - " .. stem.name)
+                    reaper.GetSetMediaTrackInfo_String(newTrack, "P_NAME", newTrackName, true)
+                    local color = rgbToReaperColor(stem.color[1], stem.color[2], stem.color[3])
+                    reaper.SetMediaTrackInfo_Value(newTrack, "I_CUSTOMCOLOR", color)
+                    local newItem = reaper.AddMediaItemToTrack(newTrack)
+                    reaper.SetMediaItemInfo_Value(newItem, "D_POSITION", selPos)
+                    reaper.SetMediaItemInfo_Value(newItem, "D_LENGTH", selLen)
+                    local newTake = reaper.AddTakeToMediaItem(newItem)
+                    reaper.SetMediaItemTake_Source(newTake, reaper.PCM_Source_CreateFromFile(stemPath))
+                    reaper.GetSetMediaItemTakeInfo_String(newTake, "P_NAME", stem.name, true)
+                    reaper.SetMediaItemInfo_Value(newItem, "I_CUSTOMCOLOR", color)
+                    importedCount = importedCount + 1
+                end
+            end
+        end
+
+        if folderTrack and importedCount > 0 then
+            reaper.SetMediaTrackInfo_Value(reaper.GetTrack(0, trackIdx + importedCount - 1), "I_FOLDERDEPTH", -1)
+        end
+
+        reaper.PreventUIRefresh(-1)
+        reaper.UpdateArrange()
+        reaper.Undo_EndBlock("STEMwerk: Create stem tracks from selection", -1)
+        return importedCount
     end
 
-    reaper.Undo_EndBlock("STEMwerk: Create stem tracks from selection", -1)
-    return importedCount
+    -- Process each selected item that overlaps the time selection
+    local totalCreated = 0
+    for _, info in ipairs(itemsToProcess) do
+        local item = info.item
+        local ipos = info.pos
+        local ilen = info.len
+        local track = reaper.GetMediaItem_Track(item)
+        if not track then goto continue_item end
+
+        local sourceName = "Track"
+        local _, tn = reaper.GetTrackName(track)
+        if tn and tn ~= "" then sourceName = tn end
+
+        local trackIdx = math.floor(reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER"))
+
+        local folderTrack = nil
+        if SETTINGS.createFolder then
+            reaper.InsertTrackAtIndex(trackIdx, true)
+            folderTrack = reaper.GetTrack(0, trackIdx)
+            reaper.GetSetMediaTrackInfo_String(folderTrack, "P_NAME", sourceName .. " - Stems", true)
+            reaper.SetMediaTrackInfo_Value(folderTrack, "I_FOLDERDEPTH", 1)
+            reaper.SetMediaTrackInfo_Value(folderTrack, "I_CUSTOMCOLOR", rgbToReaperColor(180, 140, 200))
+            trackIdx = trackIdx + 1
+        end
+
+        local createdForThisItem = 0
+        local selectedCount = 0
+        for _, s in ipairs(STEMS) do if s.selected and stemPaths[s.name:lower()] then selectedCount = selectedCount + 1 end end
+
+        for _, stem in ipairs(STEMS) do
+            if stem.selected then
+                local stemPath = stemPaths[stem.name:lower()]
+                if stemPath then
+                    reaper.InsertTrackAtIndex(trackIdx + createdForThisItem, true)
+                    local newTrack = reaper.GetTrack(0, trackIdx + createdForThisItem)
+                    local newTrackName = selectedCount == 1 and (stem.name .. " - " .. sourceName) or (sourceName .. " - " .. stem.name)
+                    reaper.GetSetMediaTrackInfo_String(newTrack, "P_NAME", newTrackName, true)
+                    local color = rgbToReaperColor(stem.color[1], stem.color[2], stem.color[3])
+                    reaper.SetMediaTrackInfo_Value(newTrack, "I_CUSTOMCOLOR", color)
+
+                    local newItem = reaper.AddMediaItemToTrack(newTrack)
+                    reaper.SetMediaItemInfo_Value(newItem, "D_POSITION", ipos)
+                    reaper.SetMediaItemInfo_Value(newItem, "D_LENGTH", ilen)
+                    local newTake = reaper.AddTakeToMediaItem(newItem)
+                    reaper.SetMediaItemTake_Source(newTake, reaper.PCM_Source_CreateFromFile(stemPath))
+                    reaper.GetSetMediaItemTakeInfo_String(newTake, "P_NAME", stem.name, true)
+                    reaper.SetMediaItemInfo_Value(newItem, "I_CUSTOMCOLOR", color)
+
+                    createdForThisItem = createdForThisItem + 1
+                    totalCreated = totalCreated + 1
+                end
+            end
+        end
+
+        if folderTrack and createdForThisItem > 0 then
+            reaper.SetMediaTrackInfo_Value(reaper.GetTrack(0, trackIdx + createdForThisItem - 1), "I_FOLDERDEPTH", -1)
+        end
+
+        ::continue_item::
+    end
+
+    reaper.PreventUIRefresh(-1)
+    reaper.UpdateArrange()
+    reaper.Undo_EndBlock("STEMwerk: Create stem tracks from selection (per-item)", -1)
+    return totalCreated
 end
 
 -- Store temp directory for async workflow
@@ -11727,6 +11870,22 @@ function showResultWindow(selectedStems, message)
     initCelebration()
 
     -- Restore playback state if it was playing before processing
+    -- Ensure playhead is inside the time selection (or move it to the start)
+    if timeSelectionStart and timeSelectionEnd then
+        local playStateBefore = savedPlaybackState or 0
+        local isPlayingBefore = (playStateBefore & 1) == 1
+        local posNow
+        if isPlayingBefore and reaper.GetPlayPosition then
+            posNow = reaper.GetPlayPosition()
+        else
+            posNow = reaper.GetCursorPosition()
+        end
+        local within = (posNow >= timeSelectionStart) and (posNow <= timeSelectionEnd)
+        if not within then
+            reaper.SetEditCurPos(timeSelectionStart, true, isPlayingBefore)
+        end
+    end
+
     if savedPlaybackState == 1 then
         -- Was playing, resume playback
         reaper.OnPlayButton()
@@ -11977,36 +12136,39 @@ startSeparationProcessForJob = function(job, segmentSize)
         -- Use WMI Win32_Process.Create to get a PID for proper cancel.
         local deviceArg = SETTINGS.device or "auto"
 
+        -- Write a tiny VBS launcher that runs PowerShell invisibly via wscript
         local vbsPath = job.trackDir .. PATH_SEP .. "run_hidden.vbs"
         local vbsFile = io.open(vbsPath, "w")
         if vbsFile then
-            vbsFile:write('On Error Resume Next\n')
-            vbsFile:write('Dim locator, svc, startup, pid\n')
-            vbsFile:write('Set locator = CreateObject("WbemScripting.SWbemLocator")\n')
-            vbsFile:write('Set svc = locator.ConnectServer(".", "root\\cimv2")\n')
-            vbsFile:write('Set startup = svc.Get("Win32_ProcessStartup").SpawnInstance_\n')
-            vbsFile:write('startup.ShowWindow = 0\n')
+            local function q(s) return tostring(s or "") end
+            local python = q(PYTHON_PATH)
+            local sep = q(SEPARATOR_SCRIPT)
+            local inF = q(job.inputFile)
+            local outD = q(job.trackDir)
+            local m = tostring(SETTINGS.model)
+            local dev = tostring(deviceArg)
+            local stdoutF = stdoutFile
+            local stderrF = logFile
+            local pidF = pidFile
 
-            local function q(s)
-                s = tostring(s or "")
-                return s:gsub('"', '""')
-            end
+            local psInner = "$p = Start-Process -FilePath '" .. python .. "' -ArgumentList @('-u','" .. sep .. "','" .. inF .. "','" .. outD .. "','--model','" .. m .. "','--device','" .. dev .. "') -WindowStyle Hidden -PassThru -RedirectStandardOutput '" .. stdoutF .. "' -RedirectStandardError '" .. stderrF .. "'; Set-Content -Path '" .. pidF .. "' -Value $p.Id -Encoding ascii"
 
-            local cmd = '"' .. PYTHON_PATH .. '" -u "' .. SEPARATOR_SCRIPT .. '" ' ..
-                '"' .. job.inputFile .. '" "' .. job.trackDir .. '" --model ' .. tostring(SETTINGS.model) .. ' --device ' .. tostring(deviceArg)
-            vbsFile:write('Dim cmd\n')
-            vbsFile:write('cmd = "' .. q(cmd) .. '"\n')
-            vbsFile:write('pid = 0\n')
-            vbsFile:write('svc.Get("Win32_Process").Create cmd, Null, startup, pid\n')
-            vbsFile:write('CreateObject("Scripting.FileSystemObject").CreateTextFile("' .. q(pidFile) .. '", True).WriteLine pid\n')
+            vbsFile:write('Set sh = CreateObject("WScript.Shell")\n')
+            vbsFile:write('cmd = "powershell -NoProfile -ExecutionPolicy Bypass -Command ""' .. psInner .. '"""\n')
+            vbsFile:write('sh.Run cmd, 0, False\n')
             vbsFile:close()
         end
 
+        local wscriptCmd = 'wscript "' .. vbsPath .. '"'
         if reaper.ExecProcess then
-            reaper.ExecProcess('wscript "' .. vbsPath .. '"', -1)
+            debugLog('Calling reaper.ExecProcess: ' .. wscriptCmd)
+            reaper.ExecProcess(wscriptCmd, -1)
+            debugLog('reaper.ExecProcess called for job ' .. tostring(job.index))
         else
-            local handle = io.popen('wscript "' .. vbsPath .. '"')
+            debugLog('Calling io.popen for: ' .. wscriptCmd)
+            local handle = io.popen(wscriptCmd)
             if handle then handle:close() end
+            debugLog('io.popen returned for job ' .. tostring(job.index))
         end
     else
         -- macOS/Linux
@@ -12014,6 +12176,8 @@ startSeparationProcessForJob = function(job, segmentSize)
         local cmd = '"' .. PYTHON_PATH .. '" -u "' .. SEPARATOR_SCRIPT .. '" '
         cmd = cmd .. '"' .. job.inputFile .. '" "' .. job.trackDir .. '" --model ' .. SETTINGS.model .. ' --device ' .. deviceArg
         cmd = cmd .. ' >"' .. stdoutFile .. '" 2>"' .. logFile .. '" && echo DONE >"' .. doneFile .. '" &'
+        -- diagnostic launcher file removed
+        debugLog('Executing background command for job ' .. tostring(job.index) .. ': ' .. tostring(cmd))
         os.execute(cmd)
     end
 end
@@ -12978,13 +13142,23 @@ processAllStemsResult = function()
             #multiTrackQueue.jobs, itemWord, timeStr, speedStr, modeStr, actionMsg)
     end
 
-    -- Clear time selection na processing om dubbele runs te voorkomen
-    -- (main() wordt opnieuw aangeroepen na result window, zou anders opnieuw starten)
-    if timeSelectionMode then
-        reaper.GetSet_LoopTimeRange(true, false, 0, 0, false)
-        timeSelectionMode = false
-        debugLog("Cleared time selection after multi-track processing")
+    -- Before clearing time selection, ensure playhead/cursor is at selection start
+    if timeSelectionMode and timeSelectionStart and timeSelectionEnd then
+        local playStateBefore = savedPlaybackState or 0
+        local isPlayingBefore = (playStateBefore & 1) == 1
+        local posNow
+        if isPlayingBefore and reaper.GetPlayPosition then
+            posNow = reaper.GetPlayPosition()
+        else
+            posNow = reaper.GetCursorPosition()
+        end
+        local within = (posNow >= timeSelectionStart) and (posNow <= timeSelectionEnd)
+        if not within then
+            reaper.SetEditCurPos(timeSelectionStart, true, isPlayingBefore)
+        end
     end
+
+    -- Preserve user's time selection after processing (do not clear)
 
     -- Reset processing guard
     isProcessingActive = false
@@ -13036,6 +13210,25 @@ function runSeparationWorkflow()
         itemPos = timeSelectionStart
         itemLen = timeSelectionEnd - timeSelectionStart
         debugLog("Time selection mode: " .. timeSelectionStart .. " to " .. timeSelectionEnd)
+
+        -- If user has selected specific tracks, process only those tracks within the time selection
+        local selTrackCount = reaper.CountSelectedTracks(0)
+        if selTrackCount and selTrackCount > 0 then
+            local trackList = {}
+            for t = 0, selTrackCount - 1 do
+                local tr = reaper.GetSelectedTrack(0, t)
+                if tr and reaper.ValidatePtr(tr, "MediaTrack*") then
+                    table.insert(trackList, tr)
+                end
+            end
+            if #trackList > 0 then
+                runSingleTrackSeparation(trackList)
+                if not multiTrackQueue.active then
+                    isProcessingActive = false
+                end
+                return
+            end
+        end
     elseif selectedItem then
         -- No time selection, use selected item
         itemPos = reaper.GetMediaItemInfo_Value(selectedItem, "D_POSITION")
@@ -13074,9 +13267,42 @@ function runSeparationWorkflow()
 
         timeSelectionSourceItem = sourceItem  -- Store for later use
     else
-        -- No time selection - check if we have multiple items selected (multi-track mode)
+        -- No time selection - if tracks or items are selected, build combined track list
+        local selTrackCount = reaper.CountSelectedTracks(0)
         local selItemCount = reaper.CountSelectedMediaItems(0)
-        debugLog("No time selection, selected items: " .. selItemCount)
+        debugLog("No time selection, selected items: " .. selItemCount .. ", selected tracks: " .. selTrackCount)
+
+        -- Build combined track list from selected tracks and tracks of selected items
+        local trackSet = {}
+        if selTrackCount and selTrackCount > 0 then
+            for t = 0, selTrackCount - 1 do
+                local tr = reaper.GetSelectedTrack(0, t)
+                if tr and reaper.ValidatePtr(tr, "MediaTrack*") then trackSet[tr] = true end
+            end
+        end
+        if selItemCount and selItemCount > 0 then
+            for i = 0, selItemCount - 1 do
+                local it = reaper.GetSelectedMediaItem(0, i)
+                if it and reaper.ValidatePtr(it, "MediaItem*") then
+                    local tr = reaper.GetMediaItem_Track(it)
+                    if tr and reaper.ValidatePtr(tr, "MediaTrack*") then trackSet[tr] = true end
+                end
+            end
+        end
+        local combinedTrackList = {}
+        for tr in pairs(trackSet) do table.insert(combinedTrackList, tr) end
+        if #combinedTrackList > 1 then
+            debugLog("Combined selection: running multi-track on " .. #combinedTrackList .. " tracks")
+            runSingleTrackSeparation(combinedTrackList)
+            if not multiTrackQueue.active then
+                debugLog("Combined selection setup did not activate queue; resetting processing guard")
+                isProcessingActive = false
+            end
+            return
+        end
+
+        -- Fall back to original per-item selection behavior
+        debugLog("Proceeding with per-item logic (selItemCount=" .. tostring(selItemCount) .. ")")
 
         if selItemCount > 1 then
             -- Multiple items selected - group by track and use multi-track mode
