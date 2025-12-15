@@ -1,0 +1,7 @@
+{
+  "\"torch_version\"": "2.9.1+cpu",
+  "\"cuda_available\"": false,
+  "\"cuda_version\"": null,
+  "\"device_count\"": 0,
+  "\"devices\"": []
+}

@@ -51,8 +51,10 @@ def gui_main():
     try:
         import PySimpleGUI as sg
     except Exception:
-        print('PySimpleGUI not installed. Run `pip install PySimpleGUI` or run with --no-gui')
-        sys.exit(1)
+        print('PySimpleGUI not installed. Falling back to headless mode (running GPU check).')
+        info = run_gpu_check()
+        print_summary(info)
+        return
 
     sg.theme('DefaultNoMoreNagging')
     layout = [

@@ -62,7 +62,7 @@ function Try-InstallTorch([string]$index) {
         }
         return $true
     } catch {
-        Write-Warning ("Install failed for index ${index}: " + $Error[0].Exception.Message)
+        Write-Warning "Install failed for index $index: $_"
         return $false
     }
 }
@@ -80,10 +80,25 @@ if (-not $installed) {
 python -m pip install --upgrade matplotlib
 
 # Small CUDA inspect (prints to console and writes to tests/bench_results/nvidia_inspect.json)
-$tempPy = [System.IO.Path]::GetTempFileName() + ".py"
-Set-Content -Path $tempPy -Value $inspect
-python $tempPy
-Remove-Item $tempPy
+$inspect = @'
+import json, torch
+out = {}
+out['"torch_version"'] = torch.__version__
+out['"cuda_available"'] = torch.cuda.is_available()
+out['"cuda_version"'] = torch.version.cuda
+out['"device_count"'] = torch.cuda.device_count()
+out['"devices"'] = []
+for i in range(torch.cuda.device_count()):
+    try:
+        out['"devices"'].append(torch.cuda.get_device_name(i))
+    except Exception as e:
+        out['"devices"'].append(str(e))
+print(json.dumps(out))
+with open('tests/bench_results/nvidia_inspect.json','w',encoding='utf-8') as f:
+    f.write(json.dumps(out, indent=2))
+'@
+
+python - <<<$inspect
 
 # Ensure bench_results directory exists
 $br = Join-Path $RepoRoot 'tests\bench_results'
@@ -111,11 +126,9 @@ if (Test-Path $mapf) {
 # Commit & push results if requested
 if ($Push) {
     Write-Host "Staging bench results and pushing to origin..."
-    git add tests/bench_results
-    if ($LASTEXITCODE -ne 0) { Write-Warning "git add failed" }
-    $msg = "bench: add nvidia laptop results $(Get-Date -Format o)"
-    git commit -m $msg
-    if ($LASTEXITCODE -ne 0) { Write-Warning "git commit likely had nothing to commit" }
+    git add tests/bench_results || Write-Warning "git add failed"
+    $msg = "bench: add nvidia laptop results `$(Get-Date -Format o)`"
+    git commit -m $msg || Write-Warning "git commit likely had nothing to commit"
     git push origin HEAD
 }
 
