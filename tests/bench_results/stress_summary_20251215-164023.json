@@ -1,0 +1,9 @@
+{
+  "timestamp": "20251215-164023",
+  "summary": {
+    "cpu": {
+      "runs": 20,
+      "median_of_medians": 23.879913806915283
+    }
+  }
+}
