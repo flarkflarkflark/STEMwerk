@@ -9051,18 +9051,22 @@ function drawMainDialogModalOverlay()
     GUI.uiClickedThisFrame = true
 
     -- Keep the "cool background FX" alive even while the modal is open (dialogLoop() returns early).
-    -- Draw a subtle procedural-art layer behind the dim overlay.
+    -- Match main dialog day/night: pure black in dark mode, pure white in light mode.
+    local bg = (SETTINGS and SETTINGS.darkMode) and 0 or 1
+    gfx.set(bg, bg, bg, 1)
+    gfx.rect(0, 0, gfx.w, gfx.h, 1)
+
     if proceduralArt and proceduralArt.seed == 0 then
         generateNewArt()
     end
     if proceduralArt then
         proceduralArt.time = (proceduralArt.time or 0) + 0.016
-        -- Subtle: low alpha, and include background so it doesn't look like an empty black screen.
-        drawProceduralArtInternal(0, 0, gfx.w, gfx.h, proceduralArt.time, (mainDialogArt and mainDialogArt.rotation) or 0, false, 0.22)
+        -- Subtle: draw art without its own background, so theme (day/night) controls the backdrop.
+        drawProceduralArtInternal(0, 0, gfx.w, gfx.h, proceduralArt.time, (mainDialogArt and mainDialogArt.rotation) or 0, true, 0.22)
     end
 
-    -- Dim background
-    gfx.set(0, 0, 0, 0.55 * fade)
+    -- Theme-aware readability overlay (same idea as main dialog: black in dark mode, white in light mode).
+    gfx.set(bg, bg, bg, 0.55 * fade)
     gfx.rect(0, 0, gfx.w, gfx.h, 1)
 
     -- Layout
