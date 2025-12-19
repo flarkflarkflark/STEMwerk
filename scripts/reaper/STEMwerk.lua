@@ -9034,6 +9034,165 @@ local function drawButton(x, y, w, h, label, isDefault, color, fontSizeOverride)
     return clicked
 end
 
+-- In-dialog modal overlay ------------------------------------------------------
+-- We render this INSIDE dialogLoop() to avoid competing gfx windows / defer loops.
+-- Defined as a standalone function to avoid bloating dialogLoop() locals (Lua has a local limit per function).
+function drawMainDialogModalOverlay()
+    local modal = GUI and GUI.modal or nil
+    if not modal then return end
+
+    -- Fade-in (subtle)
+    if not modal._t0 then modal._t0 = os.clock() end
+    local fade = math.min(1, (os.clock() - (modal._t0 or 0)) / 0.12)
+
+    local mx, my = gfx.mouse_x, gfx.mouse_y
+    local mouseDown = (gfx.mouse_cap & 1) == 1
+    local char = gfx.getchar()
+    GUI.uiClickedThisFrame = true
+
+    -- Dim background
+    gfx.set(0, 0, 0, 0.55 * fade)
+    gfx.rect(0, 0, gfx.w, gfx.h, 1)
+
+    -- Layout
+    local pad = S(14)
+    local iconR = S(12)
+    local topBarH = S(3)
+    local btnW = S(96)
+    local btnH = S(28)
+    local maxBoxW = S(360)
+    local boxW = math.min(gfx.w - S(40), maxBoxW)
+    local contentW = boxW - pad * 2
+    local textX = pad + iconR * 2 + S(10)
+    local textW = contentW - (iconR * 2 + S(10))
+
+    local title = tostring(modal.title or (T("warning") or "Warning"))
+    local msg = tostring(modal.message or "")
+    local iconKind = tostring(modal.icon or "warning")
+
+    -- Measure + wrap
+    gfx.setfont(1, "Arial", S(13), string.byte('b'))
+    local titleH = gfx.texth
+    gfx.setfont(1, "Arial", S(12))
+    local lineH = gfx.texth + S(2)
+    local lines = _wrapTextToWidth(msg, math.max(S(120), textW))
+    if #lines == 0 then lines = {msg} end
+
+    local boxH = pad + topBarH + S(10) + titleH + S(8) + (#lines * lineH) + S(12) + btnH + pad
+    boxH = math.max(boxH, S(150))
+
+    local boxX = (gfx.w - boxW) / 2
+    local boxY = (gfx.h - boxH) / 2
+
+    -- Rounded rect fill (scanline)
+    local r = S(12)
+    local function roundedFill(x, y, w, h, radius)
+        radius = math.max(0, math.min(radius, math.floor(math.min(w, h) / 2)))
+        for i = 0, h - 1 do
+            local inset = 0
+            if i < radius then
+                inset = radius - math.sqrt(radius * radius - (radius - i) * (radius - i))
+            elseif i > h - 1 - radius then
+                local di = i - (h - 1 - radius)
+                inset = radius - math.sqrt(radius * radius - di * di)
+            end
+            gfx.line(x + inset, y + i, x + w - inset, y + i)
+        end
+    end
+
+    -- Panel bg
+    gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 0.98)
+    roundedFill(boxX, boxY, boxW, boxH, r)
+
+    -- Panel border (simple)
+    gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 0.95)
+    gfx.rect(boxX, boxY, boxW, boxH, 0)
+
+    -- Stem-color top bar (like tooltips)
+    for i = 0, math.floor(boxW) - 1 do
+        local colorIdx = math.floor(i / boxW * 4) + 1
+        colorIdx = math.min(4, math.max(1, colorIdx))
+        local c = STEM_BORDER_COLORS[colorIdx]
+        gfx.set(c[1] / 255, c[2] / 255, c[3] / 255, 0.92 * fade)
+        gfx.line(boxX + i, boxY + 1, boxX + i, boxY + topBarH)
+    end
+
+    -- Icon (warning/info/error)
+    local iconX = boxX + pad + iconR
+    local iconY = boxY + pad + topBarH + S(12)
+    local ic = THEME.accent
+    if iconKind == "error" then
+        ic = {1.0, 0.35, 0.35}
+    elseif iconKind == "info" then
+        ic = {0.35, 0.75, 1.0}
+    end
+    gfx.set(ic[1], ic[2], ic[3], 1)
+    gfx.circle(iconX, iconY, iconR, 1, 1)
+    gfx.set(0, 0, 0, 0.65)
+    gfx.circle(iconX, iconY, iconR, 0, 1)
+    gfx.set(1, 1, 1, 1)
+    gfx.setfont(1, "Arial", S(14), string.byte('b'))
+    local sym = (iconKind == "info") and "i" or "!"
+    local symW = gfx.measurestr(sym)
+    gfx.x = iconX - symW / 2
+    gfx.y = iconY - gfx.texth / 2 - 1
+    gfx.drawstr(sym)
+
+    -- Title + message (left aligned)
+    local tx = boxX + textX
+    local ty = boxY + pad + topBarH + S(4)
+    gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
+    gfx.setfont(1, "Arial", S(14), string.byte('b'))
+    gfx.x = tx
+    gfx.y = ty
+    gfx.drawstr(title)
+
+    gfx.setfont(1, "Arial", S(12))
+    gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+    local y = ty + titleH + S(8)
+    for _, ln in ipairs(lines) do
+        gfx.x = tx
+        gfx.y = y
+        gfx.drawstr(tostring(ln))
+        y = y + lineH
+    end
+
+    -- OK button (theme primary)
+    local btnX = boxX + (boxW - btnW) / 2
+    local btnY = boxY + boxH - btnH - pad
+    local hover = mx >= btnX and mx <= btnX + btnW and my >= btnY and my <= btnY + btnH
+    local col = hover and THEME.buttonPrimaryHover or THEME.buttonPrimary
+    gfx.set(col[1], col[2], col[3], 1)
+    for i = 0, btnH - 1 do
+        local radius = btnH / 2
+        local inset = 0
+        if i < radius then
+            inset = radius - math.sqrt(radius * radius - (radius - i) * (radius - i))
+        elseif i > btnH - radius then
+            inset = radius - math.sqrt(radius * radius - (i - (btnH - radius)) * (i - (btnH - radius)))
+        end
+        gfx.line(btnX + inset, btnY + i, btnX + btnW - inset, btnY + i)
+    end
+    gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 0.9)
+    gfx.rect(btnX, btnY, btnW, btnH, 0)
+    gfx.set(1, 1, 1, 1)
+    gfx.setfont(1, "Arial", S(12), string.byte('b'))
+    local okText = T("ok") or "OK"
+    local okW = gfx.measurestr(okText)
+    gfx.x = btnX + (btnW - okW) / 2
+    gfx.y = btnY + (btnH - gfx.texth) / 2
+    gfx.drawstr(okText)
+
+    local overBox = mx >= boxX and mx <= boxX + boxW and my >= boxY and my <= boxY + boxH
+    local clickedOk = (not mouseDown) and GUI.modalWasMouseDown and hover
+    local clickedOutside = (not mouseDown) and GUI.modalWasMouseDown and (not overBox)
+    local keyClose = (char == 27) or (char == 13)
+    if clickedOk or clickedOutside or keyClose then
+        GUI.modal = nil
+    end
+    GUI.modalWasMouseDown = mouseDown
+end
+
 -- Main dialog loop
 local function dialogLoop()
     -- Try to make window resizable (needs to be called after window is visible)
@@ -9084,75 +9243,7 @@ local function dialogLoop()
     -- --- Modal dialog overlay (used for simple in-dialog warnings like "no stems selected") ---
     -- This avoids switching gfx windows (and competing defer loops) from inside dialogLoop().
     if GUI.modal then
-        local mx, my = gfx.mouse_x, gfx.mouse_y
-        local mouseDown = (gfx.mouse_cap & 1) == 1
-        local char = gfx.getchar()
-
-        -- Dim background
-        gfx.set(0, 0, 0, 0.55)
-        gfx.rect(0, 0, gfx.w, gfx.h, 1)
-
-        local boxW = math.min(gfx.w - S(40), S(320))
-        local boxH = S(150)
-        local boxX = (gfx.w - boxW) / 2
-        local boxY = (gfx.h - boxH) / 2
-
-        -- Box background + border
-        gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 0.98)
-        gfx.rect(boxX, boxY, boxW, boxH, 1)
-        gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
-        gfx.rect(boxX, boxY, boxW, boxH, 0)
-
-        -- Title
-        gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
-        gfx.setfont(1, "Arial", S(14), string.byte('b'))
-        local title = tostring(GUI.modal.title or "Warning")
-        local titleW = gfx.measurestr(title)
-        gfx.x = boxX + (boxW - titleW) / 2
-        gfx.y = boxY + S(14)
-        gfx.drawstr(title)
-
-        -- Message (simple wrap by lines, word-wrap isn't critical for this short text)
-        gfx.setfont(1, "Arial", S(12))
-        local msg = tostring(GUI.modal.message or "")
-        local lineY = boxY + S(40)
-        for ln in (msg .. "\n"):gmatch("(.-)\n") do
-            if ln ~= "" then
-                local lw = gfx.measurestr(ln)
-                gfx.x = boxX + (boxW - lw) / 2
-                gfx.y = lineY
-                gfx.drawstr(ln)
-                lineY = lineY + S(16)
-            else
-                lineY = lineY + S(10)
-            end
-        end
-
-        -- OK button
-        local btnW = S(90)
-        local btnH = S(26)
-        local btnX = boxX + (boxW - btnW) / 2
-        local btnY = boxY + boxH - btnH - S(12)
-        local hover = mx >= btnX and mx <= btnX + btnW and my >= btnY and my <= btnY + btnH
-        local col = hover and THEME.buttonHover or THEME.button
-        gfx.set(col[1], col[2], col[3], 1)
-        gfx.rect(btnX, btnY, btnW, btnH, 1)
-        gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
-        gfx.rect(btnX, btnY, btnW, btnH, 0)
-        gfx.set(1, 1, 1, 1)
-        gfx.setfont(1, "Arial", S(12), string.byte('b'))
-        local okText = T("ok") or "OK"
-        local okW = gfx.measurestr(okText)
-        gfx.x = btnX + (btnW - okW) / 2
-        gfx.y = btnY + (btnH - gfx.texth) / 2
-        gfx.drawstr(okText)
-
-        -- Close modal: click OK, ESC, or Enter
-        if ((not mouseDown) and GUI.modalWasMouseDown and hover) or (char == 27) or (char == 13) then
-            GUI.modal = nil
-        end
-        GUI.modalWasMouseDown = mouseDown
-
+        drawMainDialogModalOverlay()
         reaper.defer(dialogLoop)
         return
     end
