@@ -10277,7 +10277,7 @@ local function dialogLoop()
 
     gfx.set(1, 1, 1, 1)
     gfx.setfont(1, "Arial", S(13), string.byte('b'))
-    local closeText = "Close"
+    local closeText = T("close") or "Close"
     local closeTextW = gfx.measurestr(closeText)
     gfx.x = closeBtnX + (closeBtnW - closeTextW) / 2
     gfx.y = footerRow4Y + (btnH - S(13)) / 2
@@ -13605,6 +13605,9 @@ function resultWindowLoop()
         captureWindowGeometry("STEMwerk - Complete")
         saveSettings()
         gfx.quit()
+        -- Ensure the user immediately sees what was created/changed in REAPER (no extra click required).
+        -- Some systems don't redraw the arrange view until the next interaction.
+        adjustTrackLayout()
         -- Geef focus terug aan REAPER main window
         local mainHwnd = reaper.GetMainHwnd()
         if mainHwnd and reaper.JS_Window_SetFocus then
