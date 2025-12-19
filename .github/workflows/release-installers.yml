@@ -2,6 +2,11 @@ name: Build installers
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to upload assets to (e.g. v2.1.0). Leave empty when running from a tag push."
+        required: false
+        default: ""
   push:
     tags:
       - "v*"
@@ -17,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      release_tag: ${{ steps.v.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,13 +34,25 @@ jobs:
           VERSION="$(tr -d '\r\n' < "${STEMWERK_VERSION_FILE}")"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-          # Only enforce on tag builds (workflow_dispatch should still work).
-          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
-            TAG="${GITHUB_REF_NAME#v}"
-            if [[ "$TAG" != "$VERSION" ]]; then
-              echo "ERROR: tag v$TAG does not match VERSION=$VERSION"
-              exit 1
-            fi
+          # Determine release tag:
+          # - Tag push: use the pushed tag
+          # - workflow_dispatch: use the provided input
+          RELEASE_TAG="${{ github.event.inputs.tag }}"
+          if [[ -z "$RELEASE_TAG" && "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ -z "$RELEASE_TAG" ]]; then
+            echo "ERROR: No release tag provided. Use workflow_dispatch input tag=vX.Y.Z, or run on a v* tag push."
+            exit 1
+          fi
+
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+          TAG_VER="${RELEASE_TAG#v}"
+          if [[ "$TAG_VER" != "$VERSION" ]]; then
+            echo "ERROR: release tag $RELEASE_TAG does not match VERSION=$VERSION"
+            exit 1
           fi
 
   windows-exe:
@@ -60,6 +78,7 @@ jobs:
       - name: Upload release asset (Windows .exe)
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.validate-version.outputs.release_tag }}
           files: installer/windows/dist/*.exe
 
   macos-pkg:
@@ -78,6 +97,7 @@ jobs:
       - name: Upload release asset (macOS .pkg)
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.validate-version.outputs.release_tag }}
           files: installer/macos/dist/*.pkg
 
   linux-packages:
@@ -120,6 +140,7 @@ jobs:
       - name: Upload release assets (Linux)
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.validate-version.outputs.release_tag }}
           files: |
             installer/linux/dist/*.deb
             installer/linux/dist/*.rpm
