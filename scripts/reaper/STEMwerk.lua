@@ -10230,6 +10230,10 @@ local function dialogLoop()
                 end
             end
             PROCESS_SELECTION_SNAPSHOT = snap
+            debugLog(string.format(
+                "Process click: snap selection time=(%.6f..%.6f) items=%d tracks=%d",
+                tonumber(ts0) or -1, tonumber(ts1) or -1, #snap.items, #snap.tracks
+            ))
         end
         saveSettings()
         gfx.quit()
@@ -15011,11 +15015,24 @@ function runSeparationWorkflow()
     isProcessingActive = true
     debugLog("=== runSeparationWorkflow started ===")
 
+    -- Capture time selection ONCE to avoid flicker/race conditions (some systems briefly report equal start/end).
+    local ts0, ts1 = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+    local hasTimeSel = ((ts1 or 0) - (ts0 or 0)) > 0.000001
+
+    debugLog(string.format(
+        "Workflow start selection: timeSel=%s (%.6f..%.6f) selItems=%d selTracks=%d snap=%s",
+        tostring(hasTimeSel),
+        tonumber(ts0) or -1, tonumber(ts1) or -1,
+        (reaper.CountSelectedMediaItems(0) or 0),
+        (reaper.CountSelectedTracks(0) or 0),
+        tostring(PROCESS_SELECTION_SNAPSHOT ~= nil)
+    ))
+
     -- If REAPER reports no selection at workflow start, try to restore the snapshot taken
     -- when the user pressed Process.
     do
         local hasSelNow = false
-        if hasTimeSelection() then
+        if hasTimeSel then
             hasSelNow = true
         elseif (reaper.CountSelectedMediaItems(0) or 0) > 0 then
             hasSelNow = true
@@ -15046,6 +15063,17 @@ function runSeparationWorkflow()
                 end
             end
             reaper.UpdateArrange()
+
+            -- Re-read time selection after restore, once.
+            ts0, ts1 = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+            hasTimeSel = ((ts1 or 0) - (ts0 or 0)) > 0.000001
+            debugLog(string.format(
+                "After restore: timeSel=%s (%.6f..%.6f) selItems=%d selTracks=%d",
+                tostring(hasTimeSel),
+                tonumber(ts0) or -1, tonumber(ts1) or -1,
+                (reaper.CountSelectedMediaItems(0) or 0),
+                (reaper.CountSelectedTracks(0) or 0)
+            ))
         end
     end
 
@@ -15073,7 +15101,7 @@ function runSeparationWorkflow()
 
     -- If no items selected but tracks are selected (and no time selection),
     -- auto-select all items on those tracks
-    if not selectedItem and not hasTimeSelection() and reaper.CountSelectedTracks(0) > 0 then
+    if not selectedItem and (not hasTimeSel) and reaper.CountSelectedTracks(0) > 0 then
         debugLog("No items/time selection, but tracks selected - auto-selecting items on tracks")
         for t = 0, reaper.CountSelectedTracks(0) - 1 do
             local track = reaper.GetSelectedTrack(0, t)
@@ -15090,9 +15118,9 @@ function runSeparationWorkflow()
 
     -- Time selection takes priority over item selection
     -- This allows processing a specific region regardless of which item is selected
-    if hasTimeSelection() then
+    if hasTimeSel then
         timeSelectionMode = true
-        timeSelectionStart, timeSelectionEnd = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+        timeSelectionStart, timeSelectionEnd = ts0, ts1
         itemPos = timeSelectionStart
         itemLen = timeSelectionEnd - timeSelectionStart
         debugLog("Time selection mode: " .. timeSelectionStart .. " to " .. timeSelectionEnd)
@@ -15121,6 +15149,12 @@ function runSeparationWorkflow()
         itemLen = reaper.GetMediaItemInfo_Value(selectedItem, "D_LENGTH")
     else
         -- No time selection and no item selected (and no track with items)
+        debugLog(string.format(
+            "No selection to process -> Start screen. timeSel=%s selItems=%d selTracks=%d",
+            tostring(hasTimeSel),
+            (reaper.CountSelectedMediaItems(0) or 0),
+            (reaper.CountSelectedTracks(0) or 0)
+        ))
         showMessage("Start", "Please select a media item, track, or make a time selection to separate.", "info", true)
         isProcessingActive = false
         return
