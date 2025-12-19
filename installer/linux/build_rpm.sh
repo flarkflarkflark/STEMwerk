@@ -12,6 +12,11 @@ if [[ -z "${STEMWERK_VERSION:-}" && -f "$ROOT_DIR/VERSION" ]]; then
   VERSION="$(tr -d '\r\n' < "$ROOT_DIR/VERSION")"
 fi
 
+# RPM spec "Version:" may not contain '-' characters.
+# Our CI/dev versions sometimes include a suffix (e.g. 2.1.0-devabcdef0 or 2.1.0-abcdef0).
+# Keep the semantic meaning but make it RPM-safe.
+RPM_VERSION="${VERSION//-/.}"
+
 rm -rf "$BUILD_DIR" "$OUT_DIR"
 mkdir -p "$OUT_DIR" \
   "$RPMTOP/BUILD" "$RPMTOP/RPMS" "$RPMTOP/SOURCES" "$RPMTOP/SPECS" "$RPMTOP/SRPMS"
@@ -32,8 +37,8 @@ rsync -a --delete \
 
 tar -C "$BUILD_DIR" -czf "$RPMTOP/SOURCES/stemwerk-$VERSION.tar.gz" "stemwerk-$VERSION"
 
-# Spec
-sed "s/@VERSION@/$VERSION/g" "$ROOT_DIR/installer/linux/rpm/stemwerk.spec" > "$RPMTOP/SPECS/stemwerk.spec"
+# Spec (use RPM-safe version)
+sed "s/@VERSION@/$RPM_VERSION/g" "$ROOT_DIR/installer/linux/rpm/stemwerk.spec" > "$RPMTOP/SPECS/stemwerk.spec"
 
 rpmbuild \
   --define "_topdir $RPMTOP" \
