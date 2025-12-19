@@ -81,12 +81,9 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y rsync dpkg-dev rpm docker.io curl
-          sudo systemctl start docker || true
-          sudo docker info
+          sudo apt-get install -y rsync dpkg-dev rpm curl
           bash installer/linux/build_deb.sh
           bash installer/linux/build_rpm.sh
-          bash installer/linux/build_archpkg.sh
           bash installer/linux/build_appimage.sh
 
       - name: Upload artifacts
@@ -98,7 +95,6 @@ jobs:
             installer/macos/dist/*.pkg
             installer/linux/dist/*.deb
             installer/linux/dist/*.rpm
-            installer/linux/dist/*.pkg.tar.zst
             installer/linux/dist/*.AppImage
           if-no-files-found: error
 
@@ -124,4 +120,4 @@ jobs:
           # Create release if it doesn't exist
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "Automated installer build."
           # Upload assets
-          gh release upload "$TAG" ./*.exe ./*.pkg ./*.deb ./*.rpm ./*.pkg.tar.zst ./*.AppImage --clobber
+          gh release upload "$TAG" ./*.exe ./*.pkg ./*.deb ./*.rpm ./*.AppImage --clobber

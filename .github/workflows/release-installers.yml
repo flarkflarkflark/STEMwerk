@@ -118,7 +118,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            rsync dpkg-dev rpm docker.io curl
+            rsync dpkg-dev rpm curl
 
       - name: Build .deb
         shell: bash
@@ -129,13 +129,6 @@ jobs:
         shell: bash
         run: |
           bash installer/linux/build_rpm.sh
-
-      - name: Build Arch package (Docker)
-        shell: bash
-        run: |
-          sudo systemctl start docker || true
-          sudo docker info
-          bash installer/linux/build_archpkg.sh
 
       - name: Build AppImage
         shell: bash
@@ -149,7 +142,6 @@ jobs:
           files: |
             installer/linux/dist/*.deb
             installer/linux/dist/*.rpm
-            installer/linux/dist/*.pkg.tar.zst
             installer/linux/dist/*.AppImage
 
 
