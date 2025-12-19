@@ -42,9 +42,14 @@ jobs:
             RELEASE_TAG="${GITHUB_REF_NAME}"
           fi
 
+          # Nice UX: when manually running workflow_dispatch, default to v<VERSION>
           if [[ -z "$RELEASE_TAG" ]]; then
-            echo "ERROR: No release tag provided. Use workflow_dispatch input tag=vX.Y.Z, or run on a v* tag push."
-            exit 1
+            RELEASE_TAG="v$VERSION"
+          fi
+
+          # Accept '2.1.1' and normalize to 'v2.1.1'
+          if [[ "$RELEASE_TAG" != v* ]]; then
+            RELEASE_TAG="v$RELEASE_TAG"
           fi
 
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
