@@ -11738,25 +11738,94 @@ local function drawProgressWindow()
 
     -- === DISPLAY AREA (ART or TERMINAL) ===
     local displayY = nerdBtnY + nerdBtnH + PS(10)
-    local displayH = h - displayY - PS(55)
+    -- If terminal is requested, try to give it a bit more vertical room.
+    local bottomPad = progressState.showTerminal and PS(30) or PS(55)
+    local displayH = h - displayY - bottomPad
     local displayX = PS(15)
     local displayW = w - PS(30)
 
-    if displayH > PS(100) then
+    if displayH > PS(60) then
         if progressState.showTerminal then
             -- === NERD TERMINAL VIEW ===
+            -- Theme-aware terminal palette (dark/light)
+            local termBgR, termBgG, termBgB, termBgA
+            local termBorderR, termBorderG, termBorderB, termBorderA
+            local termHeaderR, termHeaderG, termHeaderB, termHeaderA
+            local termHeaderTextR, termHeaderTextG, termHeaderTextB, termHeaderTextA
+            local termTextR, termTextG, termTextB, termTextA
+            local termDimR, termDimG, termDimB, termDimA
+            local termOkR, termOkG, termOkB, termOkA
+            local termWarnR, termWarnG, termWarnB, termWarnA
+            local termErrR, termErrG, termErrB, termErrA
+            local termProgR, termProgG, termProgB, termProgA
+
+            if SETTINGS.darkMode then
+                termBgR, termBgG, termBgB, termBgA = 0.02, 0.02, 0.03, 0.98
+                termBorderR, termBorderG, termBorderB, termBorderA = 0.2, 0.8, 0.2, 0.5
+                termHeaderR, termHeaderG, termHeaderB, termHeaderA = 0.2, 0.6, 0.2, 1
+                termHeaderTextR, termHeaderTextG, termHeaderTextB, termHeaderTextA = 0, 0, 0, 1
+                termTextR, termTextG, termTextB, termTextA = 0.3, 0.9, 0.3, 0.9
+                termDimR, termDimG, termDimB, termDimA = 0.3, 0.5, 0.3, 0.7
+                termOkR, termOkG, termOkB, termOkA = 0.5, 1, 0.5, 1
+                termWarnR, termWarnG, termWarnB, termWarnA = 1, 0.8, 0.3, 1
+                termErrR, termErrG, termErrB, termErrA = 1, 0.3, 0.3, 1
+                termProgR, termProgG, termProgB, termProgA = 0.3, 0.8, 1, 1
+            else
+                -- Light mode: soft paper terminal with dark text + STEMwerk green accents
+                termBgR, termBgG, termBgB, termBgA = 0.98, 0.98, 0.99, 0.98
+                termBorderR, termBorderG, termBorderB, termBorderA = 0.15, 0.55, 0.2, 0.45
+                termHeaderR, termHeaderG, termHeaderB, termHeaderA = 0.75, 0.92, 0.78, 1
+                termHeaderTextR, termHeaderTextG, termHeaderTextB, termHeaderTextA = 0.05, 0.08, 0.05, 1
+                termTextR, termTextG, termTextB, termTextA = 0.08, 0.12, 0.08, 0.95
+                termDimR, termDimG, termDimB, termDimA = 0.20, 0.30, 0.20, 0.75
+                termOkR, termOkG, termOkB, termOkA = 0.12, 0.45, 0.18, 1
+                termWarnR, termWarnG, termWarnB, termWarnA = 0.65, 0.45, 0.05, 1
+                termErrR, termErrG, termErrB, termErrA = 0.75, 0.10, 0.10, 1
+                termProgR, termProgG, termProgB, termProgA = 0.08, 0.35, 0.75, 1
+            end
+
+            -- Accent tint: cycle through selected stems as progress advances (nice variation).
+            local accentR, accentG, accentB = THEME.accent[1], THEME.accent[2], THEME.accent[3]
+            if selectedStems and #selectedStems > 0 then
+                local n = #selectedStems
+                local p = tonumber(progressState.percent) or 0
+                local idx = math.floor((p / 100) * n) + 1
+                if idx < 1 then idx = 1 end
+                if idx > n then idx = n end
+                local sc = selectedStems[idx].color or {255, 255, 255}
+                accentR, accentG, accentB = (sc[1] or 255) / 255, (sc[2] or 255) / 255, (sc[3] or 255) / 255
+            end
+
+            -- Apply tint to header/border (keep error/warn colors intact).
+            if SETTINGS.darkMode then
+                termBorderR, termBorderG, termBorderB = accentR, accentG, accentB
+                termBorderA = 0.55
+                -- Slightly dimmed accent for header fill so black header text stays readable.
+                termHeaderR, termHeaderG, termHeaderB, termHeaderA = accentR * 0.75, accentG * 0.75, accentB * 0.75, 1
+                -- Normal text follows accent a bit (variety), but keep it bright enough.
+                termTextR, termTextG, termTextB = math.max(0.15, accentR * 0.9), math.max(0.2, accentG * 0.9), math.max(0.15, accentB * 0.9)
+            else
+                -- Light mode: tint header/border only; keep normal text dark for readability.
+                termBorderR, termBorderG, termBorderB = accentR * 0.5, accentG * 0.6, accentB * 0.5
+                termBorderA = 0.45
+                termHeaderR = 0.85 + accentR * 0.12
+                termHeaderG = 0.85 + accentG * 0.12
+                termHeaderB = 0.85 + accentB * 0.12
+                termHeaderA = 1
+            end
+
             -- Dark terminal background
-            gfx.set(0.02, 0.02, 0.03, 0.98)
+            gfx.set(termBgR, termBgG, termBgB, termBgA)
             gfx.rect(displayX, displayY, displayW, displayH, 1)
 
             -- Terminal border (green)
-            gfx.set(0.2, 0.8, 0.2, 0.5)
+            gfx.set(termBorderR, termBorderG, termBorderB, termBorderA)
             gfx.rect(displayX, displayY, displayW, displayH, 0)
 
             -- Terminal header
-            gfx.set(0.2, 0.6, 0.2, 1)
+            gfx.set(termHeaderR, termHeaderG, termHeaderB, termHeaderA)
             gfx.rect(displayX, displayY, displayW, PS(18), 1)
-            gfx.set(0, 0, 0, 1)
+            gfx.set(termHeaderTextR, termHeaderTextG, termHeaderTextB, termHeaderTextA)
             gfx.setfont(1, "Courier", PS(10), string.byte('b'))
             gfx.x = displayX + PS(5)
             gfx.y = displayY + PS(3)
@@ -11795,15 +11864,15 @@ local function drawProgressWindow()
 
                     -- Color based on content
                     if line:match("error") or line:match("Error") or line:match("ERROR") then
-                        gfx.set(1, 0.3, 0.3, 1)  -- Red for errors
+                        gfx.set(termErrR, termErrG, termErrB, termErrA)  -- Error
                     elseif line:match("warning") or line:match("Warning") then
-                        gfx.set(1, 0.8, 0.3, 1)  -- Yellow for warnings
+                        gfx.set(termWarnR, termWarnG, termWarnB, termWarnA)  -- Warning
                     elseif line:match("PROGRESS") then
-                        gfx.set(0.3, 0.8, 1, 1)  -- Cyan for progress
+                        gfx.set(termProgR, termProgG, termProgB, termProgA)  -- Progress
                     elseif line:match("Separating") or line:match("100%%") then
-                        gfx.set(0.5, 1, 0.5, 1)  -- Bright green for success
+                        gfx.set(termOkR, termOkG, termOkB, termOkA)  -- Success
                     else
-                        gfx.set(0.3, 0.9, 0.3, 0.9)  -- Normal green
+                        gfx.set(termTextR, termTextG, termTextB, termTextA)  -- Normal
                     end
 
                     gfx.x = displayX + PS(5)
@@ -11815,14 +11884,14 @@ local function drawProgressWindow()
 
             -- Blinking cursor at bottom
             if math.floor(now * 2) % 2 == 0 then
-                gfx.set(0.3, 1, 0.3, 1)
+                gfx.set(termOkR, termOkG, termOkB, 1)
                 gfx.x = displayX + PS(5)
                 gfx.y = math.min(lineY, displayY + displayH - lineHeight - PS(5))
                 gfx.drawstr("_")
             end
 
             -- Terminal hint
-            gfx.set(0.3, 0.5, 0.3, 0.7)
+            gfx.set(termDimR, termDimG, termDimB, termDimA)
             gfx.setfont(1, "Courier", PS(8))
             local termHint = T("terminal_hint_return_to_art") or "Click >_ to return to art"
             local termHintW = gfx.measurestr(termHint)
@@ -11872,6 +11941,15 @@ local function drawProgressWindow()
                 end
             end
         end
+    else
+        -- Window is too short: show a clear hint instead of "green toggle but nothing".
+        gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 0.9)
+        gfx.setfont(1, "Arial", PS(9))
+        local msg = T("resize_window_for_terminal") or "Tip: resize this window taller to view Terminal / Art"
+        local msgW = gfx.measurestr(msg)
+        gfx.x = math.max(PS(10), (w - msgW) / 2)
+        gfx.y = nerdBtnY + nerdBtnH + PS(2)
+        gfx.drawstr(msg)
     end
 
     -- Update mouse state AFTER all click handling
@@ -13641,6 +13719,10 @@ function showResultWindow(selectedStems, message)
     loadSettings()
     updateTheme()
 
+    -- Ensure newly created/changed tracks/items are visible in REAPER *before* showing the Complete window.
+    -- Some systems won't repaint the arrange view until focus changes, so we also do a best-effort focus nudge below.
+    adjustTrackLayout()
+
     resultWindowState.selectedStems = selectedStems
     if type(message) == "table" then
         resultWindowState.messageData = message
@@ -13704,6 +13786,16 @@ function showResultWindow(selectedStems, message)
     end
 
     gfx.init("STEMwerk - Complete", winW, winH, 0, winX, winY)
+
+    -- Best-effort: force an arrange repaint while the Complete window is open.
+    -- This makes the processing result visible immediately (without needing to close the window).
+    reaper.defer(function()
+        adjustTrackLayout()
+        local mh = reaper.GetMainHwnd()
+        if mh and reaper.JS_Window_SetFocus then
+            reaper.JS_Window_SetFocus(mh)
+        end
+    end)
     reaper.defer(resultWindowLoop)
 end
 
@@ -13722,6 +13814,29 @@ runSingleTrackSeparation = function(trackList)
     -- Prepare all tracks: extract audio
     local trackJobs = {}
     local jobIndex = 0
+
+    local function getJobUIColor(track, fallbackIdx)
+        -- Returns {r,g,b} in 0..1 for UI tinting. Uses the track's custom color when set.
+        local fallbackStem = STEMS[((fallbackIdx or 1) - 1) % #STEMS + 1]
+        local fr = (fallbackStem.color[1] or 160) / 255
+        local fg = (fallbackStem.color[2] or 200) / 255
+        local fb = (fallbackStem.color[3] or 255) / 255
+
+        if not reaper or not reaper.GetTrackColor then
+            return { fr, fg, fb }
+        end
+        local col = reaper.GetTrackColor(track)
+        if not col or col == 0 or not reaper.ColorFromNative then
+            return { fr, fg, fb }
+        end
+        local r, g, b = reaper.ColorFromNative(col)
+        r, g, b = tonumber(r) or 0, tonumber(g) or 0, tonumber(b) or 0
+        -- Some themes store "default" as 0; if r/g/b are zeroed, use fallback.
+        if r == 0 and g == 0 and b == 0 then
+            return { fr, fg, fb }
+        end
+        return { r / 255, g / 255, b / 255 }
+    end
 
     for i, track in ipairs(trackList) do
         local _, trackName = reaper.GetTrackName(track)
@@ -13770,6 +13885,7 @@ runSingleTrackSeparation = function(trackList)
                     table.insert(trackJobs, {
                         track = track,
                         trackName = trackName .. " [" .. itemIdx .. "/" .. #selectedItems .. "]",
+                        uiColor = getJobUIColor(track, jobIndex),
                         trackDir = itemDir,
                         inputFile = inputFile,
                         sourceItem = item,
@@ -13834,6 +13950,7 @@ runSingleTrackSeparation = function(trackList)
                 table.insert(trackJobs, {
                     track = track,
                     trackName = trackName,
+                    uiColor = getJobUIColor(track, jobIndex),
                     trackDir = trackDir,
                     inputFile = inputFile,
                     sourceItem = sourceItem,
@@ -13866,11 +13983,24 @@ runSingleTrackSeparation = function(trackList)
     multiTrackQueue.sequentialMode = not SETTINGS.parallelProcessing
     multiTrackQueue.forceSequentialReason = nil
     if SETTINGS.parallelProcessing and #trackJobs > 1 then
+        local function hasRuntimeGpuBackends()
+            local list = RUNTIME_DEVICES or DEVICES or {}
+            for _, d in ipairs(list) do
+                local id = string.lower(tostring(d.id or ""))
+                local typ = string.lower(tostring(d.type or ""))
+                if typ == "cuda" or typ == "directml" or typ == "mps" then return true end
+                if id:match("^cuda:") or id:match("^directml:") or id == "mps" then return true end
+            end
+            return false
+        end
+
         local dev = string.lower(tostring(SETTINGS.device or "auto"))
         local isExplicitGpu = dev:find("cuda", 1, true) ~= nil or dev:find("directml", 1, true) ~= nil
-        if (dev == "cpu" or dev == "auto") and not isExplicitGpu then
+        -- IMPORTANT: Don't treat "auto" as CPU-only if GPU backends exist; Auto may pick GPU.
+        local cpuOnly = (dev == "cpu") or (dev == "auto" and not hasRuntimeGpuBackends())
+        if cpuOnly and not isExplicitGpu then
             multiTrackQueue.sequentialMode = true
-            multiTrackQueue.forceSequentialReason = "CPU/Auto device"
+            multiTrackQueue.forceSequentialReason = (dev == "cpu") and "CPU device" or "CPU/Auto device"
             debugLog("Forcing sequential multi-track processing (" .. multiTrackQueue.forceSequentialReason .. ")")
         end
     end
@@ -14137,7 +14267,7 @@ function drawMultiTrackProgressWindow()
     local w, h = gfx.w, gfx.h
 
     -- Scale
-    local scale = math.min(w / 480, h / 280)
+    local scale = math.min(w / PROGRESS_BASE_W, h / PROGRESS_BASE_H)
     scale = math.max(0.5, math.min(4.0, scale))
     local function PS(val) return math.floor(val * scale + 0.5) end
 
@@ -14375,80 +14505,366 @@ function drawMultiTrackProgressWindow()
     gfx.y = barY + PS(3)
     gfx.drawstr(progText)
 
-    -- Individual track progress
-    local trackY = PS(80)
-    local trackSpacing = PS(30)
+    -- === NERD TERMINAL TOGGLE BUTTON (always available; like sequential Processing window) ===
+    local nerdBtnW = PS(22)
+    local nerdBtnH = PS(18)
+    local nerdBtnX = barX
+    local nerdBtnY = barY + barH + PS(8)
+    local nerdHover = mx >= nerdBtnX and mx <= nerdBtnX + nerdBtnW and my >= nerdBtnY and my <= nerdBtnY + nerdBtnH
 
-    gfx.setfont(1, "Arial", PS(10))
-    for i, job in ipairs(multiTrackQueue.jobs) do
-        local yPos = trackY + (i - 1) * trackSpacing
+    if nerdHover then GUI.uiClickedThisFrame = true end
 
-        -- Track name
-        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-        gfx.x = barX
-        gfx.y = yPos
-        local displayName = job.trackName
-        if #displayName > 20 then displayName = displayName:sub(1, 17) .. ".." end
-        gfx.drawstr(displayName)
+    if multiTrackQueue.showTerminal then
+        gfx.set(0.3, 0.8, 0.3, 1)  -- Green when active
+    else
+        gfx.set(0.4, 0.4, 0.4, nerdHover and 1 or 0.6)
+    end
+    gfx.rect(nerdBtnX, nerdBtnY, nerdBtnW, nerdBtnH, 1)
+    gfx.set(0, 0, 0, 1)
+    gfx.setfont(1, "Courier", PS(10), string.byte('b'))
+    gfx.x = nerdBtnX + PS(3)
+    gfx.y = nerdBtnY + PS(3)
+    gfx.drawstr(">_")
 
-        -- Track progress bar
-        local tBarX = barX + PS(120)
-        local tBarW = barW - PS(150)
-        local tBarH = PS(18)
-
-        -- Progress bar background
-        gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 1)
-        gfx.rect(tBarX, yPos, tBarW, tBarH, 1)
-        gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
-        gfx.rect(tBarX, yPos, tBarW, tBarH, 0)
-
-        -- Fill
-        local tFillW = math.floor(tBarW * (job.percent or 0) / 100)
-        if tFillW > 0 then
-            -- Color based on stem being processed
-            local stemIdx = (i - 1) % #STEMS + 1
-            local stemColor = STEMS[stemIdx].color
-            gfx.set(stemColor[1]/255, stemColor[2]/255, stemColor[3]/255, 0.85)
-            gfx.rect(tBarX + 1, yPos + 1, tFillW - 2, tBarH - 2, 1)
-        end
-
-        -- Stage text inside progress bar
-        if not job.done and job.stage and job.stage ~= "" then
-            gfx.setfont(1, "Arial", PS(9))
-            gfx.set(1, 1, 1, 0.95)
-            local stageText = job.stage
-            if stageText == "Waiting.." or stageText == "Waiting..." then
-                stageText = T("waiting") or stageText
-            elseif stageText == "Starting.." or stageText == "Starting..." then
-                stageText = T("starting") or stageText
-            end
-            if #stageText > 35 then stageText = stageText:sub(1, 32) .. ".." end
-            gfx.x = tBarX + PS(5)
-            gfx.y = yPos + PS(3)
-            gfx.drawstr(stageText)
-        end
-
-        -- Done checkmark or percentage
-        gfx.setfont(1, "Arial", PS(10))
-        if job.done then
-            gfx.set(0.3, 0.75, 0.4, 1)
-            gfx.x = tBarX + tBarW + PS(8)
-            gfx.y = yPos + PS(2)
-            gfx.drawstr(T("mt_done_label") or "Done")
-        else
-            gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-            gfx.x = tBarX + tBarW + PS(8)
-            gfx.y = yPos + PS(2)
-            gfx.drawstr(string.format("%d%%", job.percent or 0))
+    if nerdHover then
+        tooltipText = multiTrackQueue.showTerminal and (T("tooltip_nerd_mode_hide") or "Switch to Art View") or (T("tooltip_nerd_mode_show") or "Nerd Mode: Show terminal output")
+        tooltipX, tooltipY = mx + PS(10), my + PS(15)
+        if mouseDown and not multiTrackQueue.wasMouseDown then
+            multiTrackQueue.showTerminal = not multiTrackQueue.showTerminal
         end
     end
 
-    -- Current processing info (positioned below progress bars)
-    local numJobs = #multiTrackQueue.jobs
-    local infoY = trackY + numJobs * trackSpacing + PS(8)  -- Below last progress bar
+    -- === DISPLAY AREA (TRACK LIST or TERMINAL) ===
+    local displayY = nerdBtnY + nerdBtnH + PS(10)
+    -- If terminal is requested, try to give it a bit more vertical room.
+    local bottomPad = multiTrackQueue.showTerminal and PS(30) or PS(55)
+    local displayH = h - displayY - bottomPad
+    local displayX = PS(15)
+    local displayW = w - PS(30)
+    local terminalViewActive = (multiTrackQueue.showTerminal and displayH > PS(60))
 
-    -- Calculate stats
+    local activeJob = nil
+    for _, job in ipairs(multiTrackQueue.jobs) do
+        if job.startTime and not job.done then activeJob = job break end
+    end
+
+    -- Individual track progress (only when not in terminal view)
+    local trackSpacing = PS(30)
+    local numJobs = #multiTrackQueue.jobs
+    local infoY = displayY + numJobs * trackSpacing + PS(8)  -- Below last progress bar
+
+    if terminalViewActive then
+        -- Treat the terminal pane as UI so background art clicks don't trigger when reading logs.
+        local termHover = mx >= displayX and mx <= displayX + displayW and my >= displayY and my <= displayY + displayH
+        if termHover then GUI.uiClickedThisFrame = true end
+
+        -- === TERMINAL VIEW (combined output from all active jobs) ===
+        -- Theme-aware terminal palette (dark/light)
+        local termBgR, termBgG, termBgB, termBgA
+        local termBorderR, termBorderG, termBorderB, termBorderA
+        local termHeaderR, termHeaderG, termHeaderB, termHeaderA
+        local termHeaderTextR, termHeaderTextG, termHeaderTextB, termHeaderTextA
+        local termTextR, termTextG, termTextB, termTextA
+        local termDimR, termDimG, termDimB, termDimA
+        local termOkR, termOkG, termOkB, termOkA
+        local termWarnR, termWarnG, termWarnB, termWarnA
+        local termErrR, termErrG, termErrB, termErrA
+        local termProgR, termProgG, termProgB, termProgA
+
+        if SETTINGS.darkMode then
+            termBgR, termBgG, termBgB, termBgA = 0.02, 0.02, 0.03, 0.98
+            termBorderR, termBorderG, termBorderB, termBorderA = 0.2, 0.8, 0.2, 0.5
+            termHeaderR, termHeaderG, termHeaderB, termHeaderA = 0.2, 0.6, 0.2, 1
+            termHeaderTextR, termHeaderTextG, termHeaderTextB, termHeaderTextA = 0, 0, 0, 1
+            termTextR, termTextG, termTextB, termTextA = 0.3, 0.9, 0.3, 0.9
+            termDimR, termDimG, termDimB, termDimA = 0.3, 0.5, 0.3, 0.7
+            termOkR, termOkG, termOkB, termOkA = 0.5, 1, 0.5, 1
+            termWarnR, termWarnG, termWarnB, termWarnA = 1, 0.8, 0.3, 1
+            termErrR, termErrG, termErrB, termErrA = 1, 0.3, 0.3, 1
+            termProgR, termProgG, termProgB, termProgA = 0.3, 0.8, 1, 1
+        else
+            termBgR, termBgG, termBgB, termBgA = 0.98, 0.98, 0.99, 0.98
+            termBorderR, termBorderG, termBorderB, termBorderA = 0.15, 0.55, 0.2, 0.45
+            termHeaderR, termHeaderG, termHeaderB, termHeaderA = 0.75, 0.92, 0.78, 1
+            termHeaderTextR, termHeaderTextG, termHeaderTextB, termHeaderTextA = 0.05, 0.08, 0.05, 1
+            termTextR, termTextG, termTextB, termTextA = 0.08, 0.12, 0.08, 0.95
+            termDimR, termDimG, termDimB, termDimA = 0.20, 0.30, 0.20, 0.75
+            termOkR, termOkG, termOkB, termOkA = 0.12, 0.45, 0.18, 1
+            termWarnR, termWarnG, termWarnB, termWarnA = 0.65, 0.45, 0.05, 1
+            termErrR, termErrG, termErrB, termErrA = 0.75, 0.10, 0.10, 1
+            termProgR, termProgG, termProgB, termProgA = 0.08, 0.35, 0.75, 1
+        end
+
+        -- Accent tint: use the currently active track color for header/border (nice "alive" feedback).
+        local activeAccent = nil
+        if activeJob and type(activeJob.uiColor) == "table" then
+            activeAccent = activeJob.uiColor
+        end
+        if activeAccent then
+            local ar, ag, ab = activeAccent[1] or THEME.accent[1], activeAccent[2] or THEME.accent[2], activeAccent[3] or THEME.accent[3]
+            if SETTINGS.darkMode then
+                termBorderR, termBorderG, termBorderB = ar, ag, ab
+                termBorderA = 0.55
+                termHeaderR, termHeaderG, termHeaderB, termHeaderA = ar * 0.75, ag * 0.75, ab * 0.75, 1
+            else
+                termBorderR, termBorderG, termBorderB = ar * 0.5, ag * 0.6, ab * 0.5
+                termBorderA = 0.45
+                termHeaderR = 0.85 + ar * 0.12
+                termHeaderG = 0.85 + ag * 0.12
+                termHeaderB = 0.85 + ab * 0.12
+                termHeaderA = 1
+            end
+        end
+
+        -- Terminal text color should follow the same color as the processed track progress bar.
+        local function jobBarColor(jobIdx)
+            local s = STEMS[((jobIdx or 1) - 1) % #STEMS + 1]
+            local c = s and s.color or {255, 255, 255}
+            return { (c[1] or 255) / 255, (c[2] or 255) / 255, (c[3] or 255) / 255 }
+        end
+        local activeBar = activeJob and jobBarColor(activeJob.index or 1) or jobBarColor(1)
+        if SETTINGS.darkMode then
+            termTextR, termTextG, termTextB = activeBar[1] * 0.95, activeBar[2] * 0.95, activeBar[3] * 0.95
+            termTextA = 0.92
+        else
+            -- Light mode: keep text readable, but nudge toward the active bar color.
+            termTextR = (termTextR * 0.85) + (activeBar[1] * 0.15)
+            termTextG = (termTextG * 0.85) + (activeBar[2] * 0.15)
+            termTextB = (termTextB * 0.85) + (activeBar[3] * 0.15)
+        end
+
+        gfx.set(termBgR, termBgG, termBgB, termBgA)
+        gfx.rect(displayX, displayY, displayW, displayH, 1)
+
+        gfx.set(termBorderR, termBorderG, termBorderB, termBorderA)
+        gfx.rect(displayX, displayY, displayW, displayH, 0)
+
+        gfx.set(termHeaderR, termHeaderG, termHeaderB, termHeaderA)
+        gfx.rect(displayX, displayY, displayW, PS(18), 1)
+        gfx.set(termHeaderTextR, termHeaderTextG, termHeaderTextB, termHeaderTextA)
+        gfx.setfont(1, "Courier", PS(10), string.byte('b'))
+        gfx.x = displayX + PS(5)
+        gfx.y = displayY + PS(3)
+        gfx.drawstr(T("terminal_output_title") or "DEMUCS OUTPUT")
+
+        local function tailFileLines(filePath, maxLines)
+            if not filePath or filePath == "" then return {} end
+            local f = io.open(filePath, "r")
+            if not f then return {} end
+            local ring = {}
+            local count = 0
+            for line in f:lines() do
+                count = count + 1
+                local idx = ((count - 1) % maxLines) + 1
+                ring[idx] = line
+            end
+            f:close()
+            local res = {}
+            local start = math.max(1, count - maxLines + 1)
+            for i = start, count do
+                local idx = ((i - 1) % maxLines) + 1
+                table.insert(res, ring[idx])
+            end
+            return res
+        end
+
+        local termNow = os.clock()
+        if (termNow - (multiTrackQueue.lastTerminalUpdate or 0)) > 0.5 then
+            multiTrackQueue.lastTerminalUpdate = termNow
+            multiTrackQueue.terminalLines = {}
+
+            -- Prefer active jobs; fall back to first job so terminal isn't empty.
+            local maxJobsToShow = 6
+            local shown = 0
+            local anyActive = false
+
+            for i, job in ipairs(multiTrackQueue.jobs) do
+                if job.startTime and not job.done then
+                    anyActive = true
+                    shown = shown + 1
+                    if shown > maxJobsToShow then break end
+                    -- Prefix with [i] so per-track coloring can apply consistently
+                    local header = string.format("[%d] ---- Track %d: %s ----", i, i, tostring(job.trackName or ""))
+                    table.insert(multiTrackQueue.terminalLines, header)
+                    local lines = tailFileLines(job.stdoutFile, 60)
+                    for _, line in ipairs(lines) do
+                        table.insert(multiTrackQueue.terminalLines, string.format("[%d] %s", i, line))
+                    end
+                end
+            end
+
+            if not anyActive then
+                local first = multiTrackQueue.jobs[1]
+                if first then
+                    table.insert(multiTrackQueue.terminalLines, "---- Output ----")
+                    local lines = tailFileLines(first.stdoutFile, 120)
+                    for _, line in ipairs(lines) do
+                        table.insert(multiTrackQueue.terminalLines, line)
+                    end
+                end
+            end
+
+            -- Hard cap so drawing stays cheap
+            local cap = 500
+            if #multiTrackQueue.terminalLines > cap then
+                local trimmed = {}
+                for i = #multiTrackQueue.terminalLines - cap + 1, #multiTrackQueue.terminalLines do
+                    table.insert(trimmed, multiTrackQueue.terminalLines[i])
+                end
+                multiTrackQueue.terminalLines = trimmed
+            end
+        end
+
+        local termContentY = displayY + PS(22)
+        local termContentH = displayH - PS(26)
+        local lineHeight = PS(12)
+        local maxLines = math.floor(termContentH / lineHeight)
+        local startLine = math.max(1, #(multiTrackQueue.terminalLines or {}) - maxLines + 1)
+        gfx.setfont(1, "Courier", PS(9))
+
+        local lineY = termContentY
+        for i = startLine, #(multiTrackQueue.terminalLines or {}) do
+            if lineY < displayY + displayH - PS(5) then
+                local line = multiTrackQueue.terminalLines[i] or ""
+                if #line > 100 then line = line:sub(1, 97) .. ".." end
+                -- Per-track tint (line prefixes are like: [3] ...). Headers use the same track tint.
+                local lineTrackIdx = tonumber(line:match("^%[(%d+)%]"))
+                local lineAccent = (lineTrackIdx and jobBarColor(lineTrackIdx)) or nil
+
+                if line:match("error") or line:match("Error") or line:match("ERROR") then
+                    gfx.set(termErrR, termErrG, termErrB, termErrA)
+                elseif line:match("warning") or line:match("Warning") then
+                    gfx.set(termWarnR, termWarnG, termWarnB, termWarnA)
+                elseif line:match("PROGRESS") then
+                    gfx.set(termProgR, termProgG, termProgB, termProgA)
+                elseif line:match("Separating") or line:match("100%%") then
+                    gfx.set(termOkR, termOkG, termOkB, termOkA)
+                else
+                    if lineTrackIdx and lineAccent and line:match("%-%-%-%-") then
+                        -- Track header line
+                        gfx.set(lineAccent[1] or termTextR, lineAccent[2] or termTextG, lineAccent[3] or termTextB, 0.98)
+                    elseif lineAccent and SETTINGS.darkMode then
+                        -- Dark mode: tint normal lines toward track color
+                        local ar, ag, ab = lineAccent[1] or termTextR, lineAccent[2] or termTextG, lineAccent[3] or termTextB
+                        gfx.set((termTextR * 0.35) + (ar * 0.65), (termTextG * 0.35) + (ag * 0.65), (termTextB * 0.35) + (ab * 0.65), termTextA)
+                    elseif lineAccent and not SETTINGS.darkMode then
+                        -- Light mode: keep it readable; use a subtle tint
+                        local ar, ag, ab = lineAccent[1] or 0.2, lineAccent[2] or 0.2, lineAccent[3] or 0.2
+                        gfx.set((termTextR * 0.8) + (ar * 0.2), (termTextG * 0.8) + (ag * 0.2), (termTextB * 0.8) + (ab * 0.2), termTextA)
+                    else
+                        gfx.set(termTextR, termTextG, termTextB, termTextA)
+                    end
+                end
+                gfx.x = displayX + PS(5)
+                gfx.y = lineY
+                gfx.drawstr(line)
+                lineY = lineY + lineHeight
+            end
+        end
+
+        -- Blinking cursor
+        if math.floor(termNow * 2) % 2 == 0 then
+            gfx.set(termOkR, termOkG, termOkB, 1)
+            gfx.x = displayX + PS(5)
+            gfx.y = math.min(lineY, displayY + displayH - lineHeight - PS(5))
+            gfx.drawstr("_")
+        end
+
+        -- Terminal hint
+        gfx.set(termDimR, termDimG, termDimB, termDimA)
+        gfx.setfont(1, "Courier", PS(8))
+        local termHint = T("terminal_hint_return_to_art") or "Click >_ to return to art"
+        local termHintW = gfx.measurestr(termHint)
+        gfx.x = displayX + (displayW - termHintW) / 2
+        gfx.y = displayY + displayH - PS(12)
+        gfx.drawstr(termHint)
+
+    else
+        if multiTrackQueue.showTerminal then
+            -- Window is too short: show a clear hint instead of "green toggle but nothing".
+            gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 0.9)
+            gfx.setfont(1, "Arial", PS(9))
+            local msg = T("resize_window_for_terminal") or "Tip: resize this window taller to view Terminal"
+            local msgW = gfx.measurestr(msg)
+            gfx.x = math.max(PS(10), (w - msgW) / 2)
+            gfx.y = nerdBtnY + nerdBtnH + PS(2)
+            gfx.drawstr(msg)
+        end
+        local trackY = displayY
+
+        gfx.setfont(1, "Arial", PS(10))
+        for i, job in ipairs(multiTrackQueue.jobs) do
+            local yPos = trackY + (i - 1) * trackSpacing
+
+            -- Track name
+            gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+            gfx.x = barX
+            gfx.y = yPos
+            local displayName = job.trackName
+            if #displayName > 20 then displayName = displayName:sub(1, 17) .. ".." end
+            gfx.drawstr(displayName)
+
+            -- Track progress bar
+            local tBarX = barX + PS(120)
+            local tBarW = barW - PS(150)
+            local tBarH = PS(18)
+
+            -- Progress bar background
+            gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 1)
+            gfx.rect(tBarX, yPos, tBarW, tBarH, 1)
+            gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+            gfx.rect(tBarX, yPos, tBarW, tBarH, 0)
+
+            -- Fill
+            local tFillW = math.floor(tBarW * (job.percent or 0) / 100)
+            if tFillW > 0 then
+                -- Color based on stem being processed
+                local stemIdx = (i - 1) % #STEMS + 1
+                local stemColor = STEMS[stemIdx].color
+                gfx.set(stemColor[1]/255, stemColor[2]/255, stemColor[3]/255, 0.85)
+                gfx.rect(tBarX + 1, yPos + 1, tFillW - 2, tBarH - 2, 1)
+            end
+
+            -- Stage text inside progress bar
+            if not job.done and job.stage and job.stage ~= "" then
+                gfx.setfont(1, "Arial", PS(9))
+                gfx.set(1, 1, 1, 0.95)
+                local stageText = job.stage
+                if stageText == "Waiting.." or stageText == "Waiting..." then
+                    stageText = T("waiting") or stageText
+                elseif stageText == "Starting.." or stageText == "Starting..." then
+                    stageText = T("starting") or stageText
+                end
+                if #stageText > 35 then stageText = stageText:sub(1, 32) .. ".." end
+                gfx.x = tBarX + PS(5)
+                gfx.y = yPos + PS(3)
+                gfx.drawstr(stageText)
+            end
+
+            -- Done checkmark or percentage
+            gfx.setfont(1, "Arial", PS(10))
+            if job.done then
+                gfx.set(0.3, 0.75, 0.4, 1)
+                gfx.x = tBarX + tBarW + PS(8)
+                gfx.y = yPos + PS(2)
+                gfx.drawstr(T("mt_done_label") or "Done")
+            else
+                gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+                gfx.x = tBarX + tBarW + PS(8)
+                gfx.y = yPos + PS(2)
+                gfx.drawstr(string.format("%d%%", job.percent or 0))
+            end
+        end
+
+        -- Current processing info (positioned below progress bars)
+        infoY = trackY + numJobs * trackSpacing + PS(8)  -- Below last progress bar
+    end
+
     local globalElapsed = os.time() - (multiTrackQueue.globalStartTime or os.time())
+
+    -- Keep the UI minimal in terminal view (like the single-track Processing window).
+    if not terminalViewActive then
+    -- Calculate stats
     local completedJobs = 0
     local activeJobs = 0
     local totalAudioDur = 0
@@ -14541,100 +14957,9 @@ function drawMultiTrackProgressWindow()
         gfx.y = infoY + PS(64)
         gfx.drawstr((T("mt_media_label") or "Media:") .. " " .. itemInfo)
     end
-
-    -- === NERD TERMINAL TOGGLE (always visible; sequential mode only) ===
-    if multiTrackQueue.sequentialMode then
-        local nerdBtnW = PS(22)
-        local nerdBtnH = PS(18)
-        local nerdBtnX = PS(20)
-        local nerdBtnY = h - PS(44)
-        local nerdHover = mx >= nerdBtnX and mx <= nerdBtnX + nerdBtnW and my >= nerdBtnY and my <= nerdBtnY + nerdBtnH
-
-        if nerdHover then GUI.uiClickedThisFrame = true end
-
-        if multiTrackQueue.showTerminal then
-            gfx.set(0.3, 0.8, 0.3, 1)
-        else
-            gfx.set(0.4, 0.4, 0.4, nerdHover and 1 or 0.6)
-        end
-        gfx.rect(nerdBtnX, nerdBtnY, nerdBtnW, nerdBtnH, 1)
-        gfx.set(0, 0, 0, 1)
-        gfx.setfont(1, "Courier", PS(10), string.byte('b'))
-        gfx.x = nerdBtnX + PS(3)
-        gfx.y = nerdBtnY + PS(3)
-        gfx.drawstr(">_")
-
-        if nerdHover then
-            tooltipText = multiTrackQueue.showTerminal and (T("tooltip_nerd_mode_hide") or "Switch to Art View") or (T("tooltip_nerd_mode_show") or "Nerd Mode: Show terminal output")
-            tooltipX, tooltipY = mx + PS(10), my + PS(15)
-            if mouseDown and not multiTrackQueue.wasMouseDown then
-                multiTrackQueue.showTerminal = not multiTrackQueue.showTerminal
-            end
-        end
-
-        if multiTrackQueue.showTerminal then
-            local termX = PS(15)
-            local termY = PS(80)
-            local termW = w - PS(30)
-            local termH = h - termY - PS(60)
-            if termH > PS(60) then
-                gfx.set(0.02, 0.02, 0.03, 0.98)
-                gfx.rect(termX, termY, termW, termH, 1)
-                gfx.set(0.2, 0.8, 0.2, 0.5)
-                gfx.rect(termX, termY, termW, termH, 0)
-                gfx.set(0.2, 0.6, 0.2, 1)
-                gfx.rect(termX, termY, termW, PS(18), 1)
-                gfx.set(0, 0, 0, 1)
-                gfx.setfont(1, "Courier", PS(10), string.byte('b'))
-                gfx.x = termX + PS(5)
-                gfx.y = termY + PS(3)
-                gfx.drawstr(T("terminal_output_title") or "DEMUCS OUTPUT")
-
-                local termNow = os.clock()
-                if (termNow - (multiTrackQueue.lastTerminalUpdate or 0)) > 0.5 then
-                    multiTrackQueue.lastTerminalUpdate = termNow
-                    multiTrackQueue.terminalLines = {}
-                    local stdoutFile = activeJob and activeJob.stdoutFile or (multiTrackQueue.jobs[1] and multiTrackQueue.jobs[1].stdoutFile) or nil
-                    if stdoutFile then
-                        local f = io.open(stdoutFile, "r")
-                        if f then
-                            for line in f:lines() do
-                                table.insert(multiTrackQueue.terminalLines, line)
-                            end
-                            f:close()
-                        end
-                    end
-                end
-
-                local termContentY = termY + PS(22)
-                local termContentH = termH - PS(26)
-                local lineHeight = PS(12)
-                local maxLines = math.floor(termContentH / lineHeight)
-                local startLine = math.max(1, #(multiTrackQueue.terminalLines or {}) - maxLines + 1)
-                gfx.setfont(1, "Courier", PS(9))
-                local lineY = termContentY
-                for i = startLine, #(multiTrackQueue.terminalLines or {}) do
-                    if lineY < termY + termH - PS(5) then
-                        local line = multiTrackQueue.terminalLines[i] or ""
-                        if #line > 100 then line = line:sub(1, 97) .. ".." end
-                        if line:match("error") or line:match("Error") or line:match("ERROR") then
-                            gfx.set(1, 0.3, 0.3, 1)
-                        elseif line:match("warning") or line:match("Warning") then
-                            gfx.set(1, 0.8, 0.3, 1)
-                        elseif line:match("PROGRESS") then
-                            gfx.set(0.3, 0.8, 1, 1)
-                        else
-                            gfx.set(0.3, 0.9, 0.3, 0.9)
-                        end
-                        gfx.x = termX + PS(5)
-                        gfx.y = lineY
-                        gfx.drawstr(line)
-                        lineY = lineY + lineHeight
-                    end
-                end
-            end
-        end
     end
+
+    -- (Terminal rendering moved into the shared display area above, so it works in both Seq and Par)
 
     -- Bottom line: Total elapsed, model, segment and cancel hint
     local totalMins = math.floor(globalElapsed / 60)
