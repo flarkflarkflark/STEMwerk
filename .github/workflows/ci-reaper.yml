@@ -22,10 +22,15 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Mark workspace as safe git directory (avoid git exit 128 on runners)
+      - name: Mark workspace as safe git directory (best-effort)
         shell: bash
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          set -euo pipefail
+          if command -v git >/dev/null 2>&1; then
+            # Some runners/shells can miss HOME; git config --global then exits 128.
+            export HOME="${HOME:-$RUNNER_TEMP}"
+            git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+          fi
       
       - name: Set up Python
         uses: actions/setup-python@v5
