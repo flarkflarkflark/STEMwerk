@@ -97,3 +97,5 @@ popd >/dev/null
 
 mv -f "$BUILD_DIR/STEMwerk-$VERSION-x86_64.AppImage" "$OUT_DIR/"
 echo "Built: $OUT_DIR/STEMwerk-$VERSION-x86_64.AppImage"
+
+
