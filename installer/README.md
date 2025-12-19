@@ -7,6 +7,7 @@ These are **packaging helpers** so you can download installers from GitHub and t
 - Windows: `STEMwerk-Setup-<version>.exe` (Inno Setup)
 - macOS: `STEMwerk-<version>.pkg` (pkgbuild)
 - Linux (Debian/Ubuntu): `stemwerk_<version>_amd64.deb` (dpkg-deb)
+- Linux (portable): `STEMwerk-<version>-x86_64.AppImage` (AppImageKit)
 - Linux (Fedora/RHEL/openSUSE): `stemwerk-<version>-1.noarch.rpm` (rpmbuild)
 - Linux (Arch): `stemwerk-<version>-1-any.pkg.tar.zst` (makepkg)
 
@@ -33,6 +34,10 @@ The REAPER Lua scripts live under `scripts/reaper/` inside the installed folder.
 ### Linux (Debian/Ubuntu)
 - `sudo apt-get install -y rsync dpkg-dev`
 - `STEMWERK_VERSION=$(cat VERSION) bash installer/linux/build_deb.sh`
+
+### Linux (AppImage)
+- Requires: `curl` (appimagetool is downloaded automatically)
+- `STEMWERK_VERSION=$(cat VERSION) bash installer/linux/build_appimage.sh`
 
 ### Linux (RPM)
 - Install `rpm` / `rpmbuild` (package name varies per distro)
