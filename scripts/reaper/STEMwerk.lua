@@ -1335,6 +1335,16 @@ local function loadSettings()
         if sel ~= "" then STEMS[i].selected = (sel == "1") end
     end
 
+    -- Sanitize: if user is not on the 6-stem model, ensure 6-stem-only stems are not selected.
+    -- (These can remain "on" from older saved settings, but they're not valid for 4-stem models.)
+    if tostring(SETTINGS.model or "") ~= "htdemucs_6s" then
+        for _, stem in ipairs(STEMS) do
+            if stem.sixStemOnly then
+                stem.selected = false
+            end
+        end
+    end
+
     -- Load window size and position
     local winW = reaper.GetExtState(EXT_SECTION, "windowWidth")
     local winH = reaper.GetExtState(EXT_SECTION, "windowHeight")
@@ -9520,7 +9530,17 @@ local function dialogLoop()
     }
     for _, model in ipairs(MODELS) do
         if drawRadio(col3X, modelY, SETTINGS.model == model.id, model.name, nil, modelBoxW, nil, nil, commonBtnFontSize) then
+            local prevModel = SETTINGS.model
             SETTINGS.model = model.id
+            -- If switching away from 6-stem, clear 6-stem-only selections (Guitar/Piano).
+            if tostring(SETTINGS.model or "") ~= "htdemucs_6s" then
+                for _, st in ipairs(STEMS) do
+                    if st.sixStemOnly then st.selected = false end
+                end
+            end
+            if prevModel ~= SETTINGS.model then
+                saveSettings()
+            end
         end
         local descKey = modelDescKeys[model.id] or "model_fast_desc"
         setTooltip(col3X, modelY, modelBoxW, btnH, T(descKey))
@@ -10044,15 +10064,19 @@ local function dialogLoop()
 
     -- Handle STEMwerk click
     if stemBtnHover and GUI.wasMouseDown and (gfx.mouse_cap & 1 == 0) then
-        local anySelected = false
+        local is6Stem = (tostring(SETTINGS.model or "") == "htdemucs_6s")
+        local validSelected = false
         for _, stem in ipairs(STEMS) do
-            if stem.selected then anySelected = true; break end
+            if stem.selected and ((not stem.sixStemOnly) or is6Stem) then
+                validSelected = true
+                break
+            end
         end
-        if anySelected then
+        if validSelected then
             saveSettings()
             GUI.result = true
         else
-            showMessage("No Stems Selected", "Please select at least one stem.", "warning")
+            showMessage(T("no_stems_selected") or "No Stems Selected", T("please_select_stem") or "Please select at least one stem.", "warning")
         end
     end
 
@@ -10102,12 +10126,18 @@ local function dialogLoop()
     elseif char == 26161 then  -- F1 key - open help
         GUI.result = "help"
     elseif char == 13 or char == 32 then  -- Enter or Space
-        local anySelected = false
+        local is6Stem = (tostring(SETTINGS.model or "") == "htdemucs_6s")
+        local validSelected = false
         for _, stem in ipairs(STEMS) do
-            if stem.selected then anySelected = true; break end
+            if stem.selected and ((not stem.sixStemOnly) or is6Stem) then
+                validSelected = true
+                break
+            end
         end
-        if anySelected then
+        if validSelected then
             GUI.result = true
+        else
+            showMessage(T("no_stems_selected") or "No Stems Selected", T("please_select_stem") or "Please select at least one stem.", "warning")
         end
     elseif char == 49 then STEMS[1].selected = not STEMS[1].selected  -- 1: Vocals
     elseif char == 50 then STEMS[2].selected = not STEMS[2].selected  -- 2: Drums
@@ -10126,9 +10156,17 @@ local function dialogLoop()
     elseif char == 105 or char == 73 then applyPresetKaraoke()  -- I: Instrumental (alias for Karaoke)
     elseif char == 97 or char == 65 then applyPresetAll()  -- A: All
     -- Model shortcuts: F=Fast, Q=Quality, S=6-stem
-    elseif char == 102 or char == 70 then SETTINGS.model = "htdemucs"  -- F: Fast
-    elseif char == 113 or char == 81 then SETTINGS.model = "htdemucs_ft"  -- Q: Quality
-    elseif char == 115 or char == 83 then SETTINGS.model = "htdemucs_6s"  -- S: 6-stem
+    elseif char == 102 or char == 70 then
+        SETTINGS.model = "htdemucs"  -- F: Fast
+        for _, st in ipairs(STEMS) do if st.sixStemOnly then st.selected = false end end
+        saveSettings()
+    elseif char == 113 or char == 81 then
+        SETTINGS.model = "htdemucs_ft"  -- Q: Quality
+        for _, st in ipairs(STEMS) do if st.sixStemOnly then st.selected = false end end
+        saveSettings()
+    elseif char == 115 or char == 83 then
+        SETTINGS.model = "htdemucs_6s"  -- S: 6-stem
+        saveSettings()
     elseif char == 43 or char == 61 then  -- + or = to grow window
         local newW = math.min(GUI.maxW, gfx.w + 76)
         local newH = math.min(GUI.maxH, gfx.h + 68)
