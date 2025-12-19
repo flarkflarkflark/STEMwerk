@@ -9081,6 +9081,82 @@ local function dialogLoop()
     -- Update scale based on current window size
     updateScale()
 
+    -- --- Modal dialog overlay (used for simple in-dialog warnings like "no stems selected") ---
+    -- This avoids switching gfx windows (and competing defer loops) from inside dialogLoop().
+    if GUI.modal then
+        local mx, my = gfx.mouse_x, gfx.mouse_y
+        local mouseDown = (gfx.mouse_cap & 1) == 1
+        local char = gfx.getchar()
+
+        -- Dim background
+        gfx.set(0, 0, 0, 0.55)
+        gfx.rect(0, 0, gfx.w, gfx.h, 1)
+
+        local boxW = math.min(gfx.w - S(40), S(320))
+        local boxH = S(150)
+        local boxX = (gfx.w - boxW) / 2
+        local boxY = (gfx.h - boxH) / 2
+
+        -- Box background + border
+        gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 0.98)
+        gfx.rect(boxX, boxY, boxW, boxH, 1)
+        gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+        gfx.rect(boxX, boxY, boxW, boxH, 0)
+
+        -- Title
+        gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
+        gfx.setfont(1, "Arial", S(14), string.byte('b'))
+        local title = tostring(GUI.modal.title or "Warning")
+        local titleW = gfx.measurestr(title)
+        gfx.x = boxX + (boxW - titleW) / 2
+        gfx.y = boxY + S(14)
+        gfx.drawstr(title)
+
+        -- Message (simple wrap by lines, word-wrap isn't critical for this short text)
+        gfx.setfont(1, "Arial", S(12))
+        local msg = tostring(GUI.modal.message or "")
+        local lineY = boxY + S(40)
+        for ln in (msg .. "\n"):gmatch("(.-)\n") do
+            if ln ~= "" then
+                local lw = gfx.measurestr(ln)
+                gfx.x = boxX + (boxW - lw) / 2
+                gfx.y = lineY
+                gfx.drawstr(ln)
+                lineY = lineY + S(16)
+            else
+                lineY = lineY + S(10)
+            end
+        end
+
+        -- OK button
+        local btnW = S(90)
+        local btnH = S(26)
+        local btnX = boxX + (boxW - btnW) / 2
+        local btnY = boxY + boxH - btnH - S(12)
+        local hover = mx >= btnX and mx <= btnX + btnW and my >= btnY and my <= btnY + btnH
+        local col = hover and THEME.buttonHover or THEME.button
+        gfx.set(col[1], col[2], col[3], 1)
+        gfx.rect(btnX, btnY, btnW, btnH, 1)
+        gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+        gfx.rect(btnX, btnY, btnW, btnH, 0)
+        gfx.set(1, 1, 1, 1)
+        gfx.setfont(1, "Arial", S(12), string.byte('b'))
+        local okText = T("ok") or "OK"
+        local okW = gfx.measurestr(okText)
+        gfx.x = btnX + (btnW - okW) / 2
+        gfx.y = btnY + (btnH - gfx.texth) / 2
+        gfx.drawstr(okText)
+
+        -- Close modal: click OK, ESC, or Enter
+        if ((not mouseDown) and GUI.modalWasMouseDown and hover) or (char == 27) or (char == 13) then
+            GUI.modal = nil
+        end
+        GUI.modalWasMouseDown = mouseDown
+
+        reaper.defer(dialogLoop)
+        return
+    end
+
     -- Check if selection was lost - switch to "Start" message
     -- Use a counter to require sustained deselection (prevents race conditions)
     -- IMPORTANT: If we're in timeSelectionMode, don't auto-close (time selection was stored at start)
@@ -10076,7 +10152,12 @@ local function dialogLoop()
             saveSettings()
             GUI.result = true
         else
-            showMessage(T("no_stems_selected") or "No Stems Selected", T("please_select_stem") or "Please select at least one stem.", "warning")
+            GUI.modal = {
+                title = T("no_stems_selected") or "No Stems Selected",
+                message = T("please_select_stem") or "Please select at least one stem.",
+                icon = "warning",
+            }
+            GUI.modalWasMouseDown = false
         end
     end
 
@@ -10137,7 +10218,12 @@ local function dialogLoop()
         if validSelected then
             GUI.result = true
         else
-            showMessage(T("no_stems_selected") or "No Stems Selected", T("please_select_stem") or "Please select at least one stem.", "warning")
+            GUI.modal = {
+                title = T("no_stems_selected") or "No Stems Selected",
+                message = T("please_select_stem") or "Please select at least one stem.",
+                icon = "warning",
+            }
+            GUI.modalWasMouseDown = false
         end
     elseif char == 49 then STEMS[1].selected = not STEMS[1].selected  -- 1: Vocals
     elseif char == 50 then STEMS[2].selected = not STEMS[2].selected  -- 2: Drums
