@@ -18,6 +18,14 @@ jobs:
     
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Mark workspace as safe git directory (avoid git exit 128 on runners)
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
       
       - name: Set up Python
         uses: actions/setup-python@v5
