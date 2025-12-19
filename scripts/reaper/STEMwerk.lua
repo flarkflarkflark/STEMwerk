@@ -10202,6 +10202,35 @@ local function dialogLoop()
             lastDialogH = gfx.h
         end
         -- Always save settings (including position) when dialog closes
+        -- Snapshot current REAPER selection BEFORE starting processing.
+        -- Rationale: clicking a gfx window can sometimes cause REAPER to temporarily report
+        -- no selected items/tracks (or users can change selection between frames). If we
+        -- then re-fetch selection inside the deferred workflow we can end up bouncing back
+        -- to the Start screen ("Please select...") right after pressing Process.
+        if GUI.result and GUI.result ~= "help" then
+            local ts0, ts1 = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+            local snap = {
+                timeStart = ts0,
+                timeEnd = ts1,
+                items = {},
+                tracks = {},
+            }
+            local nItems = reaper.CountSelectedMediaItems(0) or 0
+            for i = 0, nItems - 1 do
+                local it = reaper.GetSelectedMediaItem(0, i)
+                if it and reaper.ValidatePtr(it, "MediaItem*") then
+                    snap.items[#snap.items + 1] = it
+                end
+            end
+            local nTracks = reaper.CountSelectedTracks(0) or 0
+            for i = 0, nTracks - 1 do
+                local tr = reaper.GetSelectedTrack(0, i)
+                if tr and reaper.ValidatePtr(tr, "MediaTrack*") then
+                    snap.tracks[#snap.tracks + 1] = tr
+                end
+            end
+            PROCESS_SELECTION_SNAPSHOT = snap
+        end
         saveSettings()
         gfx.quit()
         if GUI.result == "help" then
@@ -10209,7 +10238,16 @@ local function dialogLoop()
             helpState.openedFrom = "dialog"
             reaper.defer(function() showArtGallery() end)
         elseif GUI.result then
-            reaper.defer(runSeparationWorkflow)
+            reaper.defer(function()
+                local ok, err = xpcall(runSeparationWorkflow, function(e)
+                    return tostring(e) .. "\n" .. debug.traceback("", 2)
+                end)
+                if not ok then
+                    debugLog("ERROR: runSeparationWorkflow crashed:\n" .. tostring(err))
+                    isProcessingActive = false
+                    showMessage("Error", "STEMwerk crashed while starting processing.\n\nSee log:\n" .. tostring(DEBUG_LOG_PATH), "error")
+                end
+            end)
         else
             -- User cancelled: restore original selection state if items were auto-selected
             if #autoSelectedItems > 0 then
@@ -14973,6 +15011,44 @@ function runSeparationWorkflow()
     isProcessingActive = true
     debugLog("=== runSeparationWorkflow started ===")
 
+    -- If REAPER reports no selection at workflow start, try to restore the snapshot taken
+    -- when the user pressed Process.
+    do
+        local hasSelNow = false
+        if hasTimeSelection() then
+            hasSelNow = true
+        elseif (reaper.CountSelectedMediaItems(0) or 0) > 0 then
+            hasSelNow = true
+        elseif (reaper.CountSelectedTracks(0) or 0) > 0 then
+            hasSelNow = true
+        end
+
+        if (not hasSelNow) and PROCESS_SELECTION_SNAPSHOT then
+            local snap = PROCESS_SELECTION_SNAPSHOT
+            PROCESS_SELECTION_SNAPSHOT = nil
+            debugLog("No current selection; attempting to restore snapshot from Process click")
+
+            if snap.timeStart and snap.timeEnd and (snap.timeEnd > snap.timeStart) then
+                reaper.GetSet_LoopTimeRange(true, false, snap.timeStart, snap.timeEnd, false)
+            end
+            if snap.items and #snap.items > 0 then
+                for _, it in ipairs(snap.items) do
+                    if it and reaper.ValidatePtr(it, "MediaItem*") then
+                        reaper.SetMediaItemSelected(it, true)
+                    end
+                end
+            end
+            if snap.tracks and #snap.tracks > 0 then
+                for _, tr in ipairs(snap.tracks) do
+                    if tr and reaper.ValidatePtr(tr, "MediaTrack*") then
+                        reaper.SetTrackSelected(tr, true)
+                    end
+                end
+            end
+            reaper.UpdateArrange()
+        end
+    end
+
     -- Guard: don't run if user selected 0 stems (it would produce no outputs and confuse users).
     local selectedStemCount = 0
     for _, stem in ipairs(STEMS) do
@@ -14988,7 +15064,7 @@ function runSeparationWorkflow()
 
     -- Save playback state to restore after processing
     savedPlaybackState = reaper.GetPlayState()
-    debugLog("Saved playback state: " .. savedPlaybackState)
+    debugLog("Saved playback state: " .. tostring(savedPlaybackState))
 
     -- Re-fetch the current selection at processing time (user may have changed it)
     selectedItem = reaper.GetSelectedMediaItem(0, 0)
@@ -15286,7 +15362,16 @@ main = function()
     if checkQuickPreset() then
         -- Quick mode: run immediately without dialog
         saveSettings()
-        reaper.defer(runSeparationWorkflow)
+        reaper.defer(function()
+            local ok, err = xpcall(runSeparationWorkflow, function(e)
+                return tostring(e) .. "\n" .. debug.traceback("", 2)
+            end)
+            if not ok then
+                debugLog("ERROR: runSeparationWorkflow crashed:\n" .. tostring(err))
+                isProcessingActive = false
+                showMessage("Error", "STEMwerk crashed while starting processing.\n\nSee log:\n" .. tostring(DEBUG_LOG_PATH), "error")
+            end
+        end)
     else
         -- Normal mode: show dialog
         perfMark("showStemSelectionDialog() about to run")
