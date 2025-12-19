@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT_DIR="$ROOT_DIR/installer/macos/dist"
 STAGE="$ROOT_DIR/installer/macos/build/root"
+SCRIPTS_DIR="$ROOT_DIR/installer/macos/scripts"
 
 VERSION="${STEMWERK_VERSION:-0.0.0}"
 PKG_ID="com.flarkaudio.stemwerk"
@@ -19,6 +20,7 @@ mkdir -p "$OUT_DIR" "$STAGE/Users/Shared/STEMwerk"
 rsync -a --delete \
   "$ROOT_DIR/scripts/reaper" \
   "$ROOT_DIR/i18n" \
+  "$ROOT_DIR/docs" \
   "$ROOT_DIR/README.md" \
   "$ROOT_DIR/LICENSE" \
   "$ROOT_DIR/TODO.md" \
@@ -26,8 +28,12 @@ rsync -a --delete \
   "$ROOT_DIR/TESTING.md" \
   "$STAGE/Users/Shared/STEMwerk/"
 
+# Ensure pkg scripts are executable
+chmod +x "$SCRIPTS_DIR/postinstall" 2>/dev/null || true
+
 pkgbuild \
   --root "$STAGE" \
+  --scripts "$SCRIPTS_DIR" \
   --identifier "$PKG_ID" \
   --version "$VERSION" \
   "$OUT_DIR/STEMwerk-$VERSION.pkg"

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Postinstall runs as root. We copy STEMwerk into the *active user's* REAPER Scripts folder
+# so non-technical testers don't need to hunt paths or run scripts.
+
+SRC="/Users/Shared/STEMwerk"
+
+if [[ ! -d "$SRC" ]]; then
+  echo "STEMwerk postinstall: source folder not found: $SRC"
+  exit 0
+fi
+
+# Determine the currently logged-in (console) user.
+CONSOLE_USER="$(stat -f %Su /dev/console 2>/dev/null || true)"
+if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
+  echo "STEMwerk postinstall: could not determine console user; skipping REAPER Scripts copy."
+  exit 0
+fi
+
+HOME_DIR="$(eval echo "~$CONSOLE_USER" 2>/dev/null || true)"
+if [[ -z "$HOME_DIR" || ! -d "$HOME_DIR" ]]; then
+  echo "STEMwerk postinstall: could not determine home dir for user '$CONSOLE_USER'; skipping."
+  exit 0
+fi
+
+REAPER_SCRIPTS_DIR="$HOME_DIR/Library/Application Support/REAPER/Scripts"
+TARGET="$REAPER_SCRIPTS_DIR/STEMwerk"
+
+mkdir -p "$REAPER_SCRIPTS_DIR"
+
+# Copy full folder so relative paths in STEMwerk.lua remain valid.
+rsync -a --delete "$SRC/" "$TARGET/"
+
+# Fix ownership so user can edit/delete later.
+chown -R "$CONSOLE_USER":staff "$TARGET" 2>/dev/null || true
+
+echo "STEMwerk postinstall: copied to $TARGET"
+
+# Best-effort: reveal folder in Finder for convenience (won't fail CI if no GUI).
+if command -v open >/dev/null 2>&1; then
+  sudo -u "$CONSOLE_USER" open "$TARGET" >/dev/null 2>&1 || true
+fi
+
+
