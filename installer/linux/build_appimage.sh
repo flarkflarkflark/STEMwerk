@@ -33,6 +33,10 @@ rsync -a --delete \
 # Icon (optional)
 if [[ -f "$ROOT_DIR/installer/assets/stemwerk.svg" ]]; then
   cp -f "$ROOT_DIR/installer/assets/stemwerk.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/stemwerk.svg"
+  # appimagetool expects the icon referenced by the desktop file to be present at AppDir root
+  # as stemwerk.{png,svg,xpm}. Provide svg + .DirIcon for maximum compatibility.
+  cp -f "$ROOT_DIR/installer/assets/stemwerk.svg" "$APPDIR/stemwerk.svg"
+  ln -sf "stemwerk.svg" "$APPDIR/.DirIcon"
 fi
 
 # Desktop entry
