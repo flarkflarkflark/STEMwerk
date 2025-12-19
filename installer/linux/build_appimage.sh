@@ -90,9 +90,26 @@ if [[ ! -f "$APPIMAGETOOL" ]]; then
   chmod +x "$APPIMAGETOOL"
 fi
 
-# Build the AppImage
+# Build the AppImage.
+# NOTE: On many CI runners FUSE isn't available, so executing AppImages directly fails with:
+#   dlopen(): error loading libfuse.so.2
+# Workaround: extract appimagetool and run the extracted AppRun (no FUSE required).
 pushd "$BUILD_DIR" >/dev/null
-"$APPIMAGETOOL" "$APPDIR" "STEMwerk-$VERSION-x86_64.AppImage"
+
+APPIMAGETOOL_CMD="$APPIMAGETOOL"
+if ! "$APPIMAGETOOL_CMD" --version >/dev/null 2>&1; then
+  echo "appimagetool AppImage is not runnable (likely missing FUSE). Falling back to --appimage-extract."
+  rm -rf "$BUILD_DIR/squashfs-root"
+  "$APPIMAGETOOL" --appimage-extract >/dev/null
+  if [[ -x "$BUILD_DIR/squashfs-root/AppRun" ]]; then
+    APPIMAGETOOL_CMD="$BUILD_DIR/squashfs-root/AppRun"
+  else
+    echo "ERROR: appimagetool extraction failed (no squashfs-root/AppRun)."
+    exit 1
+  fi
+fi
+
+"$APPIMAGETOOL_CMD" "$APPDIR" "STEMwerk-$VERSION-x86_64.AppImage"
 popd >/dev/null
 
 mv -f "$BUILD_DIR/STEMwerk-$VERSION-x86_64.AppImage" "$OUT_DIR/"
