@@ -69,9 +69,10 @@ def recommend_and_install(info):
     rocm = bool(info.get("rocm_detected"))
     mps = bool(info.get("mps_available"))
     directml = bool(info.get("directml_possible"))
+    amd_gpus = info.get("amd_gpus") or []
 
     print("\nDetected summary:")
-    print(json.dumps({"platform": platform, "torch": torch_version, "cuda": cuda, "nvidia": nvidia, "rocm": rocm, "mps": mps, "directml": directml}, indent=2))
+    print(json.dumps({"platform": platform, "torch": torch_version, "cuda": cuda, "nvidia": nvidia, "rocm": rocm, "mps": mps, "directml": directml, "amd_gpus": bool(amd_gpus)}, indent=2))
 
     if platform.lower().startswith("win"):
         # Windows: NVIDIA -> suggest CUDA-enabled torch on test machine; AMD -> torch-directml
@@ -110,6 +111,13 @@ def recommend_and_install(info):
                     webbrowser.open("https://pytorch.org/get-started/locally/")
                 except Exception:
                     pass
+        elif amd_gpus:
+            print("\nAMD GPU detected on Linux, but ROCm was not detected.")
+            print("To get AMD GPU acceleration you generally need:")
+            print("  1) A ROCm-supported AMD GPU + kernel/driver stack")
+            print("  2) ROCm userspace installed (so `rocminfo` works)")
+            print("  3) A ROCm-enabled PyTorch build (torch.version.hip != None and torch.cuda.is_available() == True)")
+            print("\nOnce ROCm + ROCm PyTorch are installed, re-run this tool and STEMwerk should expose GPU devices automatically.")
         else:
             print("\nNo ROCm or NVIDIA detected. You can continue with CPU-only PyTorch (already installed in many venvs).")
             if prompt_yes_no("Install CPU-only torch now?"):

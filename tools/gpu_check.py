@@ -28,10 +28,17 @@ info = {
     "torch": None,
     "cuda_available": False,
     "cuda_version": None,
+    "torch_hip": None,
+    "cuda_devices": [],
     "nvidia_smi": None,
     "rocm_detected": False,
+    "rocm_path": None,
+    "rocminfo_available": False,
+    "rocminfo_summary": None,
     "mps_available": False,
     "directml_possible": False,
+    "lspci_vga": None,
+    "amd_gpus": [],
     "quick_benchmark": {},
 }
 
@@ -48,19 +55,46 @@ try:
     except Exception:
         info["cuda_version"] = None
     try:
+        info["torch_hip"] = getattr(getattr(torch, "version", None), "hip", None)
+    except Exception:
+        info["torch_hip"] = None
+    try:
+        if info["cuda_available"]:
+            info["cuda_devices"] = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
+    except Exception:
+        info["cuda_devices"] = []
+    try:
         info["mps_available"] = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
     except Exception:
         info["mps_available"] = False
 except Exception as e:
     info["torch_error"] = str(e)
 
+# lspci (Linux) - useful to detect AMD GPUs even when ROCm isn't installed yet
+if platform.system().lower() == "linux":
+    vga = run_cmd("lspci | grep -i vga") or run_cmd("lspci -nn | grep -i vga")
+    if vga:
+        info["lspci_vga"] = vga
+        for line in vga.splitlines():
+            if "AMD" in line or "Advanced Micro Devices" in line or "AMD/ATI" in line:
+                info["amd_gpus"].append(line.strip())
+
 # nvidia-smi
 n = run_cmd("nvidia-smi -L") or run_cmd("nvidia-smi --query-gpu=name --format=csv,noheader")
 if n:
     info["nvidia_smi"] = n
 
-# ROCm hint
-if os.path.exists("/opt/rocm") or os.environ.get("ROCM_PATH"):
+# ROCm detection (Linux AMD)
+rocm_path = os.environ.get("ROCM_PATH") or ("/opt/rocm" if os.path.exists("/opt/rocm") else None)
+info["rocm_path"] = rocm_path
+rocminfo = run_cmd("rocminfo") or (run_cmd("/opt/rocm/bin/rocminfo") if os.path.exists("/opt/rocm/bin/rocminfo") else None)
+if rocminfo:
+    info["rocminfo_available"] = True
+    # Keep it short for logs/UIs
+    info["rocminfo_summary"] = "\n".join(rocminfo.splitlines()[:40])
+
+# Consider ROCm "detected" if path exists, rocminfo works, or torch exposes HIP.
+if rocm_path or info.get("rocminfo_available") or info.get("torch_hip"):
     info["rocm_detected"] = True
 
 # DirectML hint (torch-directml)

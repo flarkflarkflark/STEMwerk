@@ -12,7 +12,37 @@ This file is intentionally tracked in git so "what's next" survives VS Code / Co
 - [ ] Re-test REAPER UI scaling/status
 - [x] Confirm DirectML/device options docs
 
+- [ ] REAPER progress/complete UI polish
+	- [x] Progress: model badge aligned with progress bar (no overflow)
+	- [x] Progress: ETA parsing tolerant of stray spaces (no more "ETA: 2:")
+	- [x] Progress: device indicator reflects actual runtime device (no "GPU: DirectML" on Linux)
+	- [x] Progress: CPU not highlighted as GPU; ETA not always green
+	- [x] Progress: Nerd Mode button moved so it doesn't overlap "Elapsed:"
+	- [x] Complete: add FX icon toggle near theme icon
+	- [x] Complete: remove Space as a close/OK key
+	- [x] i18n: Nerd Mode tooltip strings
+	- [ ] Complete: verify all header tooltips consistent with main/progress windows
+
+- [ ] REAPER time-selection workflow correctness
+	- [x] Fix multi-track render producing empty `input.wav` (ffmpeg log + AudioAccessor fallback)
+	- [x] Multi-track: refuse to launch job when per-track `input.wav` is empty
+	- [x] Time selection + "Mute sel": if nothing is selected, operate on overlapping items (auto semantics)
+
 - [ ] REAPER UI: merge language/day-night/FX into 1 icon + add TT (tooltips) toggle
+
+- [ ] Linux AMD GPUs: ROCm support (if hardware/driver supports it)
+	- Detect ROCm availability (e.g. `/opt/rocm`, `torch.version.hip`, `rocminfo`)
+	- Install/guide correct ROCm-enabled PyTorch wheels for the user’s distro/ROCm version
+	- Ensure `audio_separator_process.py` reports usable GPU devices under ROCm (often via `torch.cuda`)
+	- Update device UI/tooltips to explain ROCm requirements + fallback behavior
+
+- [ ] Test matrix: NVIDIA RTX 3060 laptop (Windows + Linux)
+	- Fresh clone + venv setup
+	- Install GPU backend (CUDA torch) and verify via `python tools/gpu_check.py`
+	- Install REAPER scripts + verify device probe shows `cuda:0`
+	- Run short separation test (time selection) and confirm log says `Using GPU`
+	- Validate multi-track mode + cancel behavior
+	- Validate tooltips + i18n + window placement on both OSes
 
 - [ ] ASAP: Build downloadable installers for testing on macOS + Windows + Linux
 	- Goal: download from GitHub (Releases/Artifacts), install, and run setup + REAPER scripts

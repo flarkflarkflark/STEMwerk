@@ -36,7 +36,12 @@ import sys
 import os
 import argparse
 import json
+import importlib
+import platform
+import subprocess
 from pathlib import Path
+
+_DEVICE_SKIPS = []
 
 
 class _TeeTextIO:
@@ -114,18 +119,128 @@ def emit_progress(percent:  float, stage: str = ""):
 
 def get_available_devices():
     """Get list of available compute devices."""
-    devices = [{"id": "cpu", "name": "CPU", "type": "cpu"}]
+    global _DEVICE_SKIPS
+    _DEVICE_SKIPS = []
+    # Always include stable choices so UIs can offer consistent selections.
+    devices = [
+        {"id": "auto", "name": "Auto", "type": "auto"},
+        {"id": "cpu", "name": "CPU", "type": "cpu"},
+    ]
     
     try:
         import torch
+        is_linux = platform.system() == "Linux"
+        torch_hip = None
+        try:
+            torch_hip = getattr(getattr(torch, "version", None), "hip", None)
+        except Exception:
+            torch_hip = None
+        is_rocm = bool(is_linux and torch_hip)
+        rocblas_lib_dir = Path("/opt/rocm/lib/rocblas/library")
+
+        def _rocm_arches_from_rocminfo():
+            """Best-effort list of GPU arch names (gfx...) in enumeration order."""
+            try:
+                p = subprocess.run(
+                    ["rocminfo"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                )
+                txt = (p.stdout or "") + "\n" + (p.stderr or "")
+            except Exception:
+                return []
+
+            arches = []
+            in_agent = False
+            is_gpu = False
+            arch = None
+            for raw in txt.splitlines():
+                line = raw.strip()
+                if line.startswith("Agent "):
+                    # Flush previous agent
+                    if in_agent and is_gpu and arch and isinstance(arch, str) and arch.startswith("gfx"):
+                        arches.append(arch)
+                    in_agent = True
+                    is_gpu = False
+                    arch = None
+                    continue
+                if not in_agent:
+                    continue
+                if line.startswith("Device Type:"):
+                    # "Device Type: GPU"
+                    is_gpu = ("GPU" in line)
+                elif line.startswith("Name:"):
+                    # "Name: gfx1103"
+                    val = line.split(":", 1)[1].strip() if ":" in line else ""
+                    if val:
+                        arch = val
+            # Flush last
+            if in_agent and is_gpu and arch and isinstance(arch, str) and arch.startswith("gfx"):
+                arches.append(arch)
+            return arches
+
+        def _device_rocm_arch(idx: int):
+            # Prefer rocminfo ordering (most reliable), then fall back to torch properties if present.
+            try:
+                if not hasattr(_device_rocm_arch, "_rocminfo_arches"):
+                    setattr(_device_rocm_arch, "_rocminfo_arches", _rocm_arches_from_rocminfo())
+                arches = getattr(_device_rocm_arch, "_rocminfo_arches", []) or []
+                if idx < len(arches):
+                    return arches[idx]
+            except Exception:
+                pass
+            try:
+                props = torch.cuda.get_device_properties(idx)
+                return getattr(props, "gcnArchName", None) or getattr(props, "gcnArch", None)
+            except Exception:
+                return None
+
+        def _rocblas_has_tensile_for_arch(arch: str | None) -> bool:
+            if not arch or not isinstance(arch, str):
+                return True  # unknown -> don't block
+            arch = arch.split(":", 1)[0].strip()
+            if not arch.startswith("gfx"):
+                return True
+            try:
+                if not rocblas_lib_dir.exists():
+                    return True  # can't validate
+                # If any Tensile library mentions this arch, assume supported.
+                matches = list(rocblas_lib_dir.glob(f"*{arch}*.dat"))
+                return len(matches) > 0
+            except Exception:
+                return True
+
         if torch.cuda.is_available():
             for i in range(torch.cuda.device_count()):
                 name = torch.cuda.get_device_name(i)
+                if is_rocm:
+                    arch = _device_rocm_arch(i)
+                    if not _rocblas_has_tensile_for_arch(arch):
+                        _DEVICE_SKIPS.append({
+                            "id": f"cuda:{i}",
+                            "name": name,
+                            "reason": f"ROCm rocBLAS Tensile library missing for arch {arch} (see /opt/rocm/lib/rocblas/library).",
+                        })
+                        continue
                 devices.append({
                     "id": f"cuda:{i}",
                     "name": name,
                     "type": "cuda"
                 })
+
+        # Apple MPS (macOS)
+        try:
+            if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+                devices.append({
+                    "id": "mps",
+                    "name": "Apple MPS",
+                    "type": "mps"
+                })
+        except Exception:
+            pass
+
         # Check for DirectML (AMD on Windows)
         try:
             import torch_directml
@@ -166,22 +281,45 @@ def select_device(requested_device:  str = "auto"):
     
     available = get_available_devices()
     available_ids = [d["id"] for d in available]
+    skipped_ids = set([d.get("id") for d in (_DEVICE_SKIPS or []) if d.get("id")])
     
     if requested_device == "auto":
         # Prefer GPU over CPU
         for dev in available:
-            if dev["type"] in ["cuda", "directml"]:
+            if dev["type"] in ["cuda", "directml", "mps"]:
                 return dev["id"], dev["name"]
         return "cpu", "CPU"
     
     elif requested_device == "cpu":
+        return "cpu", "CPU"
+
+    elif requested_device == "mps":
+        try:
+            if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+                return "mps", "Apple MPS"
+        except Exception:
+            pass
+        print("WARNING:  MPS requested but not available, using CPU", file=sys.stderr)
         return "cpu", "CPU"
     
     elif requested_device in available_ids:
         for dev in available:
             if dev["id"] == requested_device:
                 return dev["id"], dev["name"]
-    
+
+    # If user requested a specific CUDA/ROCm device but it is unavailable, fall back to the first usable CUDA device if any.
+    if isinstance(requested_device, str) and requested_device.startswith("cuda:"):
+        if requested_device in skipped_ids:
+            # Provide extra hint for ROCm library issues.
+            for s in (_DEVICE_SKIPS or []):
+                if s.get("id") == requested_device:
+                    print(f"WARNING: Requested device '{requested_device}' is not usable: {s.get('reason')}", file=sys.stderr)
+                    break
+        for dev in available:
+            if dev.get("type") == "cuda" and isinstance(dev.get("id"), str) and dev["id"].startswith("cuda:"):
+                print(f"WARNING: Requested device '{requested_device}' not available; falling back to {dev['id']}", file=sys.stderr)
+                return dev["id"], dev["name"]
+
     # Fallback to CPU if requested device not found
     print(f"WARNING:  Requested device '{requested_device}' not available, using CPU", file=sys.stderr)
     return "cpu", "CPU"
@@ -224,6 +362,21 @@ def separate_stems(input_file: str, output_dir: str, model_name: str = "htdemucs
     device, device_name = select_device(device_preference)
     print(f"Device preference: {device_preference}", file=sys.stderr)
     print(f"Selected device: {device} ({device_name})", file=sys.stderr)
+
+    # IMPORTANT: Some downstream libs default to cuda:0 unless the process default device is set.
+    # Enforce the requested CUDA/ROCm device index here so "cuda:1" really means device 1.
+    if isinstance(device, str) and device.startswith("cuda:"):
+        try:
+            idx = int(device.split(":")[1])
+            torch.cuda.set_device(idx)
+            try:
+                cur = torch.cuda.current_device()
+                cur_name = torch.cuda.get_device_name(cur) if torch.cuda.is_available() else "n/a"
+                print(f"STEMWERK: torch.cuda.set_device({idx}) -> current_device={cur} ({cur_name})", file=sys.stderr)
+            except Exception:
+                print(f"STEMWERK: torch.cuda.set_device({idx})", file=sys.stderr)
+        except Exception as e:
+            print(f"WARNING: Failed to set CUDA device '{device}': {e}", file=sys.stderr)
     
     # Show available devices
     available = get_available_devices()
@@ -263,6 +416,8 @@ def separate_stems(input_file: str, output_dir: str, model_name: str = "htdemucs
     # Handle different device types
     if device == "cpu":
         separator_device = "cpu"
+    elif device == "mps":
+        separator_device = "mps"
     elif device == "directml" or device.startswith("directml:"):
         # DirectML uses special handling for audio-separator
         # audio-separator expects "privateuseone:0" for DirectML
@@ -351,7 +506,7 @@ def separate_stems(input_file: str, output_dir: str, model_name: str = "htdemucs
                     remaining = max(0, total_est - elapsed)
                     mins_remaining = int(remaining) // 60
                     secs_remaining = int(remaining) % 60
-                    eta_str = f" | ETA {mins_remaining}:{secs_remaining: 02d}"
+                    eta_str = f" | ETA {mins_remaining}:{secs_remaining:02d}"
                 else:
                     eta_str = ""
             else:
@@ -442,6 +597,88 @@ def list_devices():
         print(f"  {dev['id']}:  {dev['name']} ({dev['type']})")
     return devices
 
+
+def _pkg_version(dist_name: str):
+    """Return installed version for a distribution name (best-effort)."""
+    try:
+        try:
+            from importlib.metadata import version  # py3.8+
+        except Exception:
+            from importlib_metadata import version  # type: ignore
+        return version(dist_name)
+    except Exception:
+        return None
+
+
+def list_devices_machine():
+    """Machine-readable dump for REAPER/Lua UIs (no JSON parser needed on Lua side)."""
+    devices = get_available_devices()
+    print("STEMWERK_DEVICES_BEGIN")
+    for d in devices:
+        # Tab-separated: id, name, type
+        print(f"STEMWERK_DEVICE\t{d.get('id','')}\t{d.get('name','')}\t{d.get('type','')}")
+    # Report skipped devices (e.g. ROCm GPU arch unsupported by installed rocBLAS).
+    for s in (_DEVICE_SKIPS or []):
+        sid = s.get("id", "")
+        sname = s.get("name", "")
+        reason = s.get("reason", "")
+        # Keep it parse-safe: no tabs.
+        reason = str(reason).replace("\t", " ")
+        print(f"STEMWERK_DEVICE_SKIPPED\t{sid}\t{sname}\t{reason}")
+
+    env = {
+        "platform": platform.system(),
+        "python": platform.python_version(),
+        "sys_executable": sys.executable,
+        "pythonpath_env": os.environ.get("PYTHONPATH"),
+        "ld_library_path_env": os.environ.get("LD_LIBRARY_PATH"),
+        "torch": None,
+        "torch_file": None,
+        "cuda_available": False,
+        "cuda_count": 0,
+        "mps_available": False,
+        "directml_possible": importlib.util.find_spec("torch_directml") is not None,
+        "rocm_path_exists": False,
+        "torch_hip": None,
+        # ORT packages (audio-separator checks these)
+        "onnxruntime": _pkg_version("onnxruntime"),
+        "onnxruntime-gpu": _pkg_version("onnxruntime-gpu"),
+        "onnxruntime-directml": _pkg_version("onnxruntime-directml"),
+        "onnxruntime-silicon": _pkg_version("onnxruntime-silicon"),
+    }
+    try:
+        env["rocm_path_exists"] = bool(os.path.exists("/opt/rocm") or os.environ.get("ROCM_PATH"))
+    except Exception:
+        env["rocm_path_exists"] = False
+    try:
+        import torch
+        env["torch"] = getattr(torch, "__version__", str(torch))
+        try:
+            env["torch_file"] = getattr(torch, "__file__", None)
+        except Exception:
+            env["torch_file"] = None
+        try:
+            env["torch_hip"] = getattr(getattr(torch, "version", None), "hip", None)
+        except Exception:
+            env["torch_hip"] = None
+        try:
+            env["cuda_available"] = bool(torch.cuda.is_available())
+        except Exception:
+            env["cuda_available"] = False
+        try:
+            env["cuda_count"] = int(torch.cuda.device_count()) if env["cuda_available"] else 0
+        except Exception:
+            env["cuda_count"] = 0
+        try:
+            env["mps_available"] = bool(getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available())
+        except Exception:
+            env["mps_available"] = False
+    except Exception:
+        pass
+
+    print("STEMWERK_ENV_JSON " + json.dumps(env, ensure_ascii=False))
+    print("STEMWERK_DEVICES_END")
+
 def main():
     parser = argparse.ArgumentParser(description="Audio Separator for STEMwerk")
     parser.add_argument("input", nargs="?", help="Input audio file")
@@ -456,11 +693,22 @@ def main():
                         help="List available models")
     parser.add_argument("--list-devices", action="store_true",
                         help="List available compute devices")
+    parser.add_argument("--list-devices-machine", action="store_true",
+                        help="List available devices in a machine-readable format (for REAPER UIs)")
 
     args = parser.parse_args()
 
     # If called from REAPER, we want progress/log/done markers in output_dir.
+    # Do this early so any diagnostic prints are captured into separation_log.txt.
     write_done = _setup_reaper_io(args.output_dir if args.output_dir else None)
+
+    # If the user explicitly requests CPU, make that a hard requirement by hiding GPU devices
+    # BEFORE any torch import happens. This avoids "CPU selected but torch still uses GPU"
+    # behavior in downstream libs on ROCm/CUDA setups.
+    if str(getattr(args, "device", "auto")).lower() == "cpu":
+        for k in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+            os.environ[k] = ""
+        print("STEMWERK: CPU mode requested; masked GPU visibility via CUDA_VISIBLE_DEVICES/HIP_VISIBLE_DEVICES/ROCR_VISIBLE_DEVICES", file=sys.stderr)
 
     if args.check:
         if check_installation():
@@ -472,6 +720,9 @@ def main():
 
     if args.list_devices:
         list_devices()
+        sys.exit(0)
+    if args.list_devices_machine:
+        list_devices_machine()
         sys.exit(0)
 
     if args.list_models: 

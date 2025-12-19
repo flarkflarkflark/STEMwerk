@@ -2,16 +2,13 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "STEMwerk: Sync TODO.md",
+      "label": "Lua syntax check",
       "type": "shell",
-      "command": "powershell",
-      "args": [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "${workspaceFolder}\\scripts\\sync-todo.ps1"
-      ],
+      "command": "luac -p ${file}",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
       "problemMatcher": []
     }
   ]

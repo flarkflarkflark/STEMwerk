@@ -42,6 +42,21 @@
 
 local SCRIPT_NAME = "STEMwerk"
 local EXT_SECTION = "STEMwerk"  -- For ExtState persistence (keep old name for compatibility)
+-- STEMwerk.lua
+
+-- repo root bepalen (werkt ook als Reaper het via een symlink laadt)
+ local info = debug.getinfo(1, "S")
+local script_path = info.source:match("@?(.*[/\\])")
+if not script_path then script_path = "" end
+local repo_root = script_path:match("(.*/)") or ""
+
+-- Lua module search paths uitbreiden
+package.path =
+  package.path
+  .. ";" .. repo_root .. "?.lua"
+  .. ";" .. repo_root .. "scripts/?.lua"
+  .. ";" .. repo_root .. "scripts/reaper/?.lua"
+  .. ";" .. repo_root .. "scripts/reaper/?/init.lua"
 
 local function getExtStateValue(key)
     if reaper and reaper.GetExtState then
@@ -90,10 +105,34 @@ end
 
 local function canRunPython(pythonCmd)
     if not pythonCmd or pythonCmd == "" then return false end
-    local cmd = quoteArg(pythonCmd) .. ' -c "import sys; print(sys.version_info[0])"'
-    local rc = execProcess(cmd, 12000)
-    return rc == 0
+
+    -- If the user provided an absolute path, accept it when it's executable.
+    -- (REAPER's ExecProcess can be finicky with quoting on some systems; this avoids false negatives.)
+    if isAbsolutePath(pythonCmd) and fileExists(pythonCmd) then
+        -- Best effort executable bit check (Unix)
+        if OS ~= "Windows" then
+            local ok, _, code = os.execute(quoteArg(pythonCmd) .. " --version >/dev/null 2>&1")
+            if ok == true or ok == 0 then return true end
+            -- Fall through to ExecProcess check below
+        else
+            return true
+        end
+    end
+
+    -- Avoid nested quotes; simplest cross-platform check.
+    local cmd = quoteArg(pythonCmd) .. " --version"
+    local rc, _out = execProcess(cmd, 12000)
+    if rc == 0 then return true end
+
+    -- Final fallback for Unix shells if ExecProcess is problematic
+    if OS ~= "Windows" then
+        local ok = os.execute(cmd .. " >/dev/null 2>&1")
+        return ok == true or ok == 0
+    end
+
+    return false
 end
+
 
 -- Debug mode
 -- Default: OFF (to avoid writing logs for normal users)
@@ -150,13 +189,17 @@ end
 clearDebugLog()
 debugLog("Script loaded")
 
+-- Lightweight performance markers (only when DEBUG_MODE is enabled).
+PERF_T0 = os.clock()
+function perfMark(label)
+    if not DEBUG_MODE then return end
+    debugLog(string.format("PERF +%.3fs %s", os.clock() - PERF_T0, tostring(label)))
+end
+
 -- FORCE DEBUG (temporary diagnostic): enable logging regardless of ExtState/env
 -- (diagnostic removed)
 
--- Get script path for finding audio_separator_process.py
-local info = debug.getinfo(1, "S")
-local script_path = info.source:match("@?(.*[/\\])")
-if not script_path then script_path = "" end
+-- Script path already calculated above
 
 -- Detect OS
 local function getOS()
@@ -301,15 +344,658 @@ local STEMS = {
 -- App version (single source of truth)
 local APP_VERSION = "2.0.0"
 
+-- Forward declarations (these are defined later in the file, but used by early helpers)
+local SETTINGS
+local saveSettings
+
 -- Available processing devices
 local DEVICES = {
     { id = "auto", name = "Auto", desc = "Automatically select best GPU" },
     { id = "cpu", name = "CPU", desc = "Force CPU processing (slower)" },
-    { id = "cuda:0", name = "GPU 0", desc = "First GPU (e.g., RX 9070)" },
-    { id = "cuda:1", name = "GPU 1", desc = "Second GPU (e.g., 780M)" },
-    { id = "directml:0", name = "DirectML 0", desc = "AMD GPU via DirectML (GPU 0)" },
-    { id = "directml:1", name = "DirectML 1", desc = "AMD GPU via DirectML (GPU 1)" },
+    -- NOTE:
+    -- - "cuda:*" requires a CUDA-capable PyTorch build (typically NVIDIA; ROCm builds may also expose via torch.cuda on supported AMD).
+    -- - "directml:*" is Windows-only (requires torch-directml).
+    { id = "cuda:0", name = "CUDA 0", desc = "CUDA device 0 (requires GPU backend; usually NVIDIA)" },
+    { id = "cuda:1", name = "CUDA 1", desc = "CUDA device 1 (requires GPU backend; usually NVIDIA)" },
+    { id = "directml:0", name = "DirectML 0", desc = "Windows DirectML device 0 (requires torch-directml)" },
+    { id = "directml:1", name = "DirectML 1", desc = "Windows DirectML device 1 (requires torch-directml)" },
 }
+
+-- Runtime-probed devices (preferred over the static DEVICES table).
+-- This makes the UI capability-driven across OS/GPU stacks.
+local RUNTIME_DEVICES = nil
+local RUNTIME_DEVICE_NOTE_KEY = nil
+local RUNTIME_DEVICE_LAST_PROBE = 0
+local RUNTIME_DEVICE_PROBE_DEBUG = nil
+local RUNTIME_DEVICE_SKIP_NOTE = nil
+RUNTIME_DEVICE_PROBE = nil -- async probe state (avoid blocking UI on startup)
+
+local function runtimeDeviceSafeList()
+    return {
+        { id = "auto", name = "Auto", type = "auto", desc = "Auto-select best available backend (or CPU fallback)." },
+        { id = "cpu", name = "CPU", type = "cpu", desc = "Force CPU processing (works everywhere; slower)." },
+    }
+end
+
+local function parseDeviceListFromPythonOutput(out)
+    if not out or out == "" then return nil, nil end
+    local devices = {}
+    local envJson = nil
+    local skipNote = nil
+    local sawMachine = false
+    local sawAlt = false
+    local skips = {}
+
+    for line in out:gmatch("[^\r\n]+") do
+        if line:match("^STEMWERK_DEVICE\t") then
+            sawMachine = true
+            local id, name, typ = line:match("^STEMWERK_DEVICE\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+            if id and id ~= "" then
+                devices[#devices + 1] = { id = id, name = name ~= "" and name or id, type = typ or "", desc = "" }
+            end
+        elseif line:match("^STEMWERK_DEVICE_SKIPPED\t") then
+            local id, name, reason = line:match("^STEMWERK_DEVICE_SKIPPED\t([^\t]*)\t([^\t]*)\t(.*)$")
+            if id and id ~= "" then
+                skips[#skips + 1] = { id = id, name = name or id, reason = reason or "" }
+            end
+        elseif line:match("^STEMWERK_CUDA_DEVICE\t") then
+            sawAlt = true
+            local id, name = line:match("^STEMWERK_CUDA_DEVICE\t([^\t]*)\t(.*)$")
+            if id and id ~= "" then
+                devices[#devices + 1] = { id = id, name = (name and name ~= "" and name) or id, type = "cuda", desc = "" }
+            end
+        elseif line:match("^STEMWERK_DML_DEVICE\t") then
+            sawAlt = true
+            local id, name = line:match("^STEMWERK_DML_DEVICE\t([^\t]*)\t(.*)$")
+            if id and id ~= "" then
+                devices[#devices + 1] = { id = id, name = (name and name ~= "" and name) or id, type = "directml", desc = "" }
+            end
+        elseif line:match("^STEMWERK_DML_ALIAS\t") then
+            -- Optional alias like: directml -> directml:0 (we still treat it as its own id)
+            sawAlt = true
+            local id, name = line:match("^STEMWERK_DML_ALIAS\t([^\t]*)\t(.*)$")
+            if id and id ~= "" then
+                devices[#devices + 1] = { id = id, name = (name and name ~= "" and name) or id, type = "directml", desc = "" }
+            end
+        elseif line:match("^STEMWERK_MPS_DEVICE\t") then
+            sawAlt = true
+            local id, name = line:match("^STEMWERK_MPS_DEVICE\t([^\t]*)\t(.*)$")
+            if id and id ~= "" then
+                devices[#devices + 1] = { id = id, name = (name and name ~= "" and name) or id, type = "mps", desc = "" }
+            end
+        elseif line:match("^STEMWERK_ENV_JSON%s+") then
+            envJson = line:gsub("^STEMWERK_ENV_JSON%s+", "")
+        end
+    end
+
+    -- Fallback: parse human output from `--list-devices`
+    if not sawMachine and not sawAlt then
+        for line in out:gmatch("[^\r\n]+") do
+            local id, name, typ = line:match("^%s*([%w%-%_:%.]+):%s*(.-)%s*%(([%w%-%_]+)%)%s*$")
+            if id and name and typ then
+                devices[#devices + 1] = { id = id, name = name ~= "" and name or id, type = typ or "", desc = "" }
+            end
+        end
+    end
+
+    if #skips > 0 then
+        local parts = {}
+        for _, s in ipairs(skips) do
+            local label = (s.id or "") .. (s.name and s.name ~= "" and (" — " .. s.name) or "")
+            local reason = s.reason or ""
+            parts[#parts + 1] = label .. (reason ~= "" and ("\n" .. reason) or "")
+        end
+        skipNote = "Not available:\n" .. table.concat(parts, "\n\n")
+    end
+
+    if #devices == 0 then return nil, envJson, skipNote end
+    return devices, envJson, skipNote
+end
+
+local function buildDeviceNoteFromEnvJson(envJson, devices)
+    local noteKey = nil
+    local onlyCpu = true
+    if devices then
+        for _, d in ipairs(devices) do
+            if d.id ~= "cpu" and d.id ~= "auto" then
+                onlyCpu = false
+                break
+            end
+        end
+    end
+
+    if onlyCpu and OS == "Linux" then
+        noteKey = "device_note_linux_no_gpu"
+    end
+
+    -- If we have JSON, we can add a bit more context without fully parsing it.
+    if envJson and envJson ~= "" then
+        -- Special case: ROCm is installed but the Python env is using a CUDA build (common when a venv
+        -- has pip-installed +cuXXX torch while the system has ROCm torch).
+        if OS == "Linux"
+            and envJson:find('"rocm_path_exists"%s*:%s*true')
+            and envJson:find('"torch"%s*:%s*".-%+cu')
+            and envJson:find('"cuda_available"%s*:%s*false')
+            and (envJson:find('"torch_hip"%s*:%s*null') or envJson:find('"torch_hip"%s*:%s*""')) then
+            noteKey = "device_note_linux_cuda_build"
+        end
+
+        if envJson:find('"cuda_available"%s*:%s*false') and OS ~= "Windows" then
+            noteKey = noteKey or "device_note_cuda_unavailable"
+        end
+        if envJson:find('"mps_available"%s*:%s*false') and OS == "macOS" then
+            noteKey = noteKey or "device_note_mps_unavailable"
+        end
+    end
+
+    return noteKey
+end
+
+-- Apply a parsed device list to globals (shared by sync + async probe).
+function applyRuntimeDevicesFromParsed(devices, envJson, now)
+    now = now or os.time()
+
+    if not devices then
+        -- Probe failed. To avoid misleading choices, show a safe minimal list.
+        debugLog("  probe FAILED -> safe device list (Auto/CPU)")
+        RUNTIME_DEVICE_SKIP_NOTE = nil
+        RUNTIME_DEVICES = runtimeDeviceSafeList()
+        RUNTIME_DEVICE_NOTE_KEY = "device_note_probe_failed"
+        RUNTIME_DEVICE_PROBE_DEBUG = "probe_failed"
+        RUNTIME_DEVICE_LAST_PROBE = now
+        if SETTINGS and SETTINGS.device and SETTINGS.device ~= "auto" and SETTINGS.device ~= "cpu" then
+            SETTINGS.device = "auto"
+            if saveSettings then saveSettings() end
+        end
+        return
+    end
+
+    -- Ensure stable entries exist even if an older Python script didn't include them.
+    local function hasId(list, id)
+        for _, d in ipairs(list) do
+            if d.id == id then return true end
+        end
+        return false
+    end
+    if not hasId(devices, "auto") then
+        table.insert(devices, 1, { id = "auto", name = "Auto", type = "auto", desc = "" })
+    end
+    if not hasId(devices, "cpu") then
+        table.insert(devices, 2, { id = "cpu", name = "CPU", type = "cpu", desc = "" })
+    end
+
+    RUNTIME_DEVICE_PROBE_DEBUG = "ok"
+
+    local function compactGpuLabel(id)
+        local idx = tostring(id or ""):match("^cuda:(%d+)$")
+        if idx then
+            return "GPU" .. idx
+        end
+        return tostring(id or "")
+    end
+
+    -- Filter out backends that can never work on this OS.
+    if OS ~= "Windows" then
+        local filtered = {}
+        for _, d in ipairs(devices) do
+            if d.type ~= "directml" and not (d.id and d.id:match("^directml")) then
+                filtered[#filtered + 1] = d
+            end
+        end
+        devices = filtered
+    end
+
+    for _, d in ipairs(devices) do
+        d.fullName = d.name
+        if d.id and (d.id:match("^cuda:%d+$") or d.id:match("^directml:%d+$") or d.type == "cuda" or d.type == "directml") then
+            d.uiName = compactGpuLabel(d.id)
+        else
+            d.uiName = d.name
+        end
+        if d.id == "auto" then
+            d.descKey = "device_auto_desc"
+        elseif d.id == "cpu" then
+            d.descKey = "device_cpu_desc"
+        elseif d.type == "cuda" then
+            d.descKey = "device_cuda_desc"
+        elseif d.type == "directml" then
+            d.descKey = "device_directml_desc"
+        elseif d.type == "mps" then
+            d.descKey = "device_mps_desc"
+        end
+    end
+
+    RUNTIME_DEVICES = devices
+    RUNTIME_DEVICE_NOTE_KEY = buildDeviceNoteFromEnvJson(envJson, devices)
+    RUNTIME_DEVICE_LAST_PROBE = now
+
+    -- If the saved device is no longer available, fall back to auto.
+    if SETTINGS and SETTINGS.device then
+        local ok = false
+        for _, d in ipairs(RUNTIME_DEVICES) do
+            if d.id == SETTINGS.device then ok = true; break end
+        end
+        if not ok then
+            SETTINGS.device = "auto"
+            if saveSettings then saveSettings() end
+        end
+    end
+end
+
+-- Start an async device probe so we never block UI creation (probe results are parsed later).
+function startRuntimeDeviceProbeAsync(force)
+    force = force or false
+    local now = os.time()
+    if not force and RUNTIME_DEVICES and (now - (RUNTIME_DEVICE_LAST_PROBE or 0) < 10) then
+        return false
+    end
+    if RUNTIME_DEVICE_PROBE and RUNTIME_DEVICE_PROBE.active then
+        return false
+    end
+
+    local function getTempDirEarly()
+        if OS == "Windows" then
+            return os.getenv("TEMP") or os.getenv("TMP") or "C:\\Temp"
+        end
+        return os.getenv("TMPDIR") or "/tmp"
+    end
+    local function makeDirEarly(path)
+        if reaper and reaper.RecursiveCreateDirectory then
+            reaper.RecursiveCreateDirectory(path, 0)
+            return
+        end
+        if OS == "Windows" then
+            os.execute('mkdir "' .. path .. '" 2>nul')
+        else
+            os.execute('mkdir -p "' .. path .. '" 2>/dev/null')
+        end
+    end
+    local function uniqueProbeDir()
+        local t = (reaper and reaper.time_precise) and reaper.time_precise() or os.clock() or 0
+        local ms = math.floor(t * 1000)
+        return getTempDirEarly() .. PATH_SEP .. "STEMwerk_devprobe_" .. tostring(os.time()) .. "_" .. tostring(ms)
+    end
+
+    local probeDir = uniqueProbeDir()
+    makeDirEarly(probeDir)
+
+    local outFile = probeDir .. PATH_SEP .. "probe_out.txt"
+    local doneFile = probeDir .. PATH_SEP .. "done.txt"
+    local pidFile = probeDir .. PATH_SEP .. "pid.txt"
+    local rcFile = probeDir .. PATH_SEP .. "rc.txt"
+
+    RUNTIME_DEVICE_PROBE = {
+        active = true,
+        startedAt = os.clock(),
+        dir = probeDir,
+        outFile = outFile,
+        doneFile = doneFile,
+        pidFile = pidFile,
+        rcFile = rcFile,
+    }
+    RUNTIME_DEVICE_PROBE_DEBUG = "async_running"
+
+    debugLog("=== Device probe: async start ===")
+    debugLog("  dir=" .. tostring(probeDir))
+
+    -- Seed a minimal list so the UI is usable while probing.
+    if not RUNTIME_DEVICES then
+        RUNTIME_DEVICES = runtimeDeviceSafeList()
+    end
+    RUNTIME_DEVICE_NOTE_KEY = "device_note_probing"
+
+    if OS == "Windows" then
+        local vbsPath = probeDir .. PATH_SEP .. "run_probe_hidden.vbs"
+        local vbsFile = io.open(vbsPath, "w")
+        if not vbsFile then
+            debugLog("Async probe: failed to write VBS")
+            RUNTIME_DEVICE_PROBE.active = false
+            return false
+        end
+
+        local function escPS(s)
+            s = tostring(s or "")
+            s = s:gsub("`", "``")
+            s = s:gsub('"', '""')
+            return s
+        end
+
+        local psInner =
+            "$ErrorActionPreference='SilentlyContinue';" ..
+            "$out='" .. escPS(outFile) .. "';" ..
+            "$rcfile='" .. escPS(rcFile) .. "';" ..
+            "$done='" .. escPS(doneFile) .. "';" ..
+            "$py='" .. escPS(PYTHON_PATH) .. "';" ..
+            "$sep='" .. escPS(SEPARATOR_SCRIPT) .. "';" ..
+            "& $py -u $sep --list-devices-machine *> $out; $rc=$LASTEXITCODE;" ..
+            " if ($rc -ne 0) { & $py -u $sep --list-devices *> $out; $rc=$LASTEXITCODE };" ..
+            " Set-Content -Path $rcfile -Value $rc -Encoding ascii;" ..
+            " Set-Content -Path $done -Value 'DONE' -Encoding ascii"
+
+        vbsFile:write('Set sh = CreateObject("WScript.Shell")' .. "\n")
+        vbsFile:write('cmd = "powershell -NoProfile -ExecutionPolicy Bypass -Command ""' .. psInner .. '"""' .. "\n")
+        vbsFile:write('sh.Run cmd, 0, False' .. "\n")
+        vbsFile:close()
+
+        local wscriptCmd = 'wscript "' .. vbsPath .. '"'
+        if reaper.ExecProcess then
+            reaper.ExecProcess(wscriptCmd, -1)
+        else
+            local h = io.popen(wscriptCmd)
+            if h then h:close() end
+        end
+    else
+        local launcherPath = probeDir .. PATH_SEP .. "run_bg.sh"
+        local script = io.open(launcherPath, "w")
+        if not script then
+            debugLog("Async probe: failed to write launcher")
+            RUNTIME_DEVICE_PROBE.active = false
+            return false
+        end
+
+        script:write("#!/bin/sh\n")
+        script:write("PY=" .. quoteArg(PYTHON_PATH) .. "\n")
+        script:write("SEP=" .. quoteArg(SEPARATOR_SCRIPT) .. "\n")
+        script:write("OUT=" .. quoteArg(outFile) .. "\n")
+        script:write("DONE=" .. quoteArg(doneFile) .. "\n")
+        script:write("PIDFILE=" .. quoteArg(pidFile) .. "\n")
+        script:write("RCFILE=" .. quoteArg(rcFile) .. "\n")
+        script:write("(\n")
+        script:write('  "$PY" -u "$SEP" --list-devices-machine >"$OUT" 2>&1\n')
+        script:write("  rc=$?\n")
+        script:write('  if [ "$rc" -ne 0 ]; then "$PY" -u "$SEP" --list-devices >"$OUT" 2>&1; rc=$?; fi\n')
+        script:write('  echo "$rc" > "$RCFILE"\n')
+        script:write('  echo DONE > "$DONE"\n')
+        script:write(") &\n")
+        script:write('echo $! > "$PIDFILE"\n')
+        script:close()
+
+        os.execute("sh " .. quoteArg(launcherPath) .. " 2>/dev/null")
+    end
+
+    return true
+end
+
+function pollRuntimeDeviceProbe()
+    if not (RUNTIME_DEVICE_PROBE and RUNTIME_DEVICE_PROBE.active) then return false end
+
+    local age = os.clock() - (RUNTIME_DEVICE_PROBE.startedAt or os.clock())
+    if age > 90 then
+        debugLog("Async device probe timed out after " .. tostring(age) .. "s")
+        RUNTIME_DEVICE_PROBE.active = false
+        applyRuntimeDevicesFromParsed(nil, nil, os.time())
+        return true
+    end
+
+    local df = io.open(RUNTIME_DEVICE_PROBE.doneFile, "r")
+    if not df then return false end
+    df:close()
+
+    local out = ""
+    local f = io.open(RUNTIME_DEVICE_PROBE.outFile, "r")
+    if f then
+        out = f:read("*a") or ""
+        f:close()
+    end
+
+    local devices, envJson, skipNote = parseDeviceListFromPythonOutput(out)
+    RUNTIME_DEVICE_SKIP_NOTE = skipNote
+    applyRuntimeDevicesFromParsed(devices, envJson, os.time())
+    RUNTIME_DEVICE_PROBE.active = false
+    debugLog("=== Device probe: async done (devices=" .. tostring(RUNTIME_DEVICES and #RUNTIME_DEVICES or 0) .. ") ===")
+    return true
+end
+
+local function refreshRuntimeDevices(force)
+    force = force or false
+    local now = os.time()
+    if not force and RUNTIME_DEVICES and (now - (RUNTIME_DEVICE_LAST_PROBE or 0) < 10) then
+        return
+    end
+
+    debugLog("=== Device probe: refreshRuntimeDevices() ===")
+    debugLog("  PYTHON_PATH=" .. tostring(PYTHON_PATH))
+    debugLog("  SEPARATOR_SCRIPT=" .. tostring(SEPARATOR_SCRIPT))
+
+    -- Probe via Python helper (preferred). If the installed script doesn't support the machine mode
+    -- flag yet, we fall back to the human-readable `--list-devices` output.
+    local devices, envJson = nil, nil
+    -- Importing torch can take a while on some systems; give this probe a generous timeout.
+    local PROBE_TIMEOUT_MS = 30000
+
+    -- Exec/capture helper: REAPER's ExecProcess sometimes returns empty output on some systems.
+    -- For probing, we can safely fall back to io.popen to capture stdout/stderr.
+    local function execCapture(cmd, timeoutMs)
+        local rc, out = execProcess(cmd, timeoutMs)
+        out = out or ""
+        debugLog("  probe execProcess rc=" .. tostring(rc) .. " outLen=" .. tostring(#out))
+        if out ~= "" then
+            return rc, out
+        end
+        if OS ~= "Windows" then
+            local h = io.popen(cmd .. " 2>&1")
+            if h then
+                local content = h:read("*a") or ""
+                local ok, _, code = h:close()
+                if ok == true then
+                    rc = 0
+                elseif type(code) == "number" then
+                    rc = code
+                else
+                    rc = rc or -1
+                end
+                debugLog("  probe io.popen rc=" .. tostring(rc) .. " outLen=" .. tostring(#content))
+                return rc, content
+            end
+        end
+        return rc, out
+    end
+
+    local cmd1 = quoteArg(PYTHON_PATH) .. " -u " .. quoteArg(SEPARATOR_SCRIPT) .. " --list-devices-machine"
+    debugLog("  probe cmd1=" .. cmd1)
+    local rc1, out1 = execCapture(cmd1, PROBE_TIMEOUT_MS)
+    if rc1 == 0 then
+        if out1 and out1 ~= "" then
+            local snippet = out1
+            if #snippet > 900 then snippet = snippet:sub(1, 900) .. "\n...(truncated)..." end
+            debugLog("  probe cmd1 output:\n" .. snippet)
+        end
+        devices, envJson, RUNTIME_DEVICE_SKIP_NOTE = parseDeviceListFromPythonOutput(out1)
+        debugLog("  probe cmd1 parsed devices=" .. tostring(devices and #devices or 0))
+    end
+    if not devices then
+        local cmd2 = quoteArg(PYTHON_PATH) .. " -u " .. quoteArg(SEPARATOR_SCRIPT) .. " --list-devices"
+        debugLog("  probe cmd2=" .. cmd2)
+        local rc2, out2 = execCapture(cmd2, PROBE_TIMEOUT_MS)
+        if rc2 == 0 then
+            if out2 and out2 ~= "" then
+                local snippet = out2
+                if #snippet > 900 then snippet = snippet:sub(1, 900) .. "\n...(truncated)..." end
+                debugLog("  probe cmd2 output:\n" .. snippet)
+            end
+            devices, envJson, RUNTIME_DEVICE_SKIP_NOTE = parseDeviceListFromPythonOutput(out2)
+            debugLog("  probe cmd2 parsed devices=" .. tostring(devices and #devices or 0))
+        end
+    end
+    if not devices then
+        -- Final fallback: probe torch capabilities directly (works even with older installed scripts).
+        -- Emits STEMWERK_ENV_JSON plus STEMWERK_*_DEVICE lines we can parse without a JSON parser.
+        local py = [[
+import json, importlib.util
+env = {}
+try:
+    import torch
+    env['torch'] = getattr(torch, '__version__', '')
+    env['cuda_available'] = bool(torch.cuda.is_available())
+    env['cuda_count'] = int(torch.cuda.device_count()) if env['cuda_available'] else 0
+    env['cuda_names'] = [torch.cuda.get_device_name(i) for i in range(env['cuda_count'])] if env['cuda_available'] else []
+    try:
+        env['mps_available'] = bool(getattr(torch.backends, 'mps', None) is not None and torch.backends.mps.is_available())
+    except Exception:
+        env['mps_available'] = False
+except Exception as e:
+    env['torch_error'] = str(e)
+    env['cuda_available'] = False
+    env['cuda_count'] = 0
+    env['cuda_names'] = []
+    env['mps_available'] = False
+env['directml_possible'] = importlib.util.find_spec('torch_directml') is not None
+print('STEMWERK_ENV_JSON ' + json.dumps(env, ensure_ascii=False))
+for i, n in enumerate(env.get('cuda_names', [])):
+    print(f'STEMWERK_CUDA_DEVICE\\tcuda:{i}\\t{n}')
+if env.get('mps_available'):
+    print('STEMWERK_MPS_DEVICE\\tmps\\tApple MPS')
+if env.get('directml_possible'):
+    try:
+        import torch_directml
+        c = torch_directml.device_count()
+        for i in range(c):
+            print(f'STEMWERK_DML_DEVICE\\tdirectml:{i}\\tDirectML GPU {i}')
+        if c == 1:
+            print('STEMWERK_DML_ALIAS\\tdirectml\\tdirectml:0')
+    except Exception:
+        pass
+]]
+        -- Avoid giant quoted -c strings (some shells/ExecProcess variants struggle with newlines).
+        -- NOTE: this runs early in the script; don't depend on helpers defined later in the file.
+        local function getTempDirEarly()
+            if OS == "Windows" then
+                return os.getenv("TEMP") or os.getenv("TMP") or "C:\\Temp"
+            end
+            return os.getenv("TMPDIR") or "/tmp"
+        end
+        local function makeDirEarly(path)
+            if reaper and reaper.RecursiveCreateDirectory then
+                reaper.RecursiveCreateDirectory(path, 0)
+                return
+            end
+            if OS == "Windows" then
+                os.execute('mkdir "' .. path .. '" 2>nul')
+            else
+                os.execute('mkdir -p "' .. path .. '" 2>/dev/null')
+            end
+        end
+        local function uniqueProbeDir()
+            local t = (reaper and reaper.time_precise) and reaper.time_precise() or os.clock() or 0
+            local ms = math.floor(t * 1000)
+            return getTempDirEarly() .. PATH_SEP .. "STEMwerk_probe_" .. tostring(os.time()) .. "_" .. tostring(ms)
+        end
+
+        local probeDir = uniqueProbeDir()
+        makeDirEarly(probeDir)
+        local probePath = probeDir .. PATH_SEP .. "stemwerk_probe_devices.py"
+        local f = io.open(probePath, "w")
+        if f then
+            f:write(py)
+            f:close()
+        end
+        local cmd3 = quoteArg(PYTHON_PATH) .. " " .. quoteArg(probePath)
+        debugLog("  probe cmd3=" .. cmd3)
+        local rc3, out3 = execCapture(cmd3, PROBE_TIMEOUT_MS)
+        if rc3 == 0 then
+            if out3 and out3 ~= "" then
+                local snippet = out3
+                if #snippet > 900 then snippet = snippet:sub(1, 900) .. "\n...(truncated)..." end
+                debugLog("  probe cmd3 output:\n" .. snippet)
+            end
+            devices, envJson, RUNTIME_DEVICE_SKIP_NOTE = parseDeviceListFromPythonOutput(out3)
+            debugLog("  probe cmd3 parsed devices=" .. tostring(devices and #devices or 0))
+        end
+    end
+
+    if not devices then
+        -- Probe failed. To avoid misleading choices, show a safe minimal list.
+        -- This is better UX than showing CUDA/DirectML when they won't work.
+        debugLog("  probe FAILED -> safe device list (Auto/CPU)")
+        RUNTIME_DEVICE_SKIP_NOTE = nil
+        RUNTIME_DEVICES = {
+            { id = "auto", name = "Auto", type = "auto", desc = "Auto-select best available backend (or CPU fallback)." },
+            { id = "cpu", name = "CPU", type = "cpu", desc = "Force CPU processing (works everywhere; slower)." },
+        }
+        RUNTIME_DEVICE_NOTE_KEY = "device_note_probe_failed"
+        RUNTIME_DEVICE_PROBE_DEBUG = "probe_failed"
+        RUNTIME_DEVICE_LAST_PROBE = now
+        if SETTINGS.device ~= "auto" and SETTINGS.device ~= "cpu" then
+            SETTINGS.device = "auto"
+            saveSettings()
+        end
+        return
+    end
+
+    -- Ensure stable entries exist even if an older Python script didn't include them.
+    local function hasId(list, id)
+        for _, d in ipairs(list) do
+            if d.id == id then return true end
+        end
+        return false
+    end
+    if not hasId(devices, "auto") then
+        table.insert(devices, 1, { id = "auto", name = "Auto", type = "auto", desc = "" })
+    end
+    if not hasId(devices, "cpu") then
+        table.insert(devices, 2, { id = "cpu", name = "CPU", type = "cpu", desc = "" })
+    end
+
+    RUNTIME_DEVICE_PROBE_DEBUG = "ok"
+
+    -- Build compact UI labels so device names fit in the column, while tooltips keep full names.
+    -- Requested UX: show just GPU0/GPU1 on the buttons; keep device id + full name in tooltip.
+    local function compactGpuLabel(id)
+        local idx = tostring(id or ""):match("^cuda:(%d+)$")
+        if idx then
+            return "GPU" .. idx
+        end
+        return tostring(id or "")
+    end
+
+    -- Filter out backends that can never work on this OS.
+    if OS ~= "Windows" then
+        local filtered = {}
+        for _, d in ipairs(devices) do
+            if d.type ~= "directml" and not (d.id and d.id:match("^directml")) then
+                filtered[#filtered + 1] = d
+            end
+        end
+        devices = filtered
+    end
+
+    -- Fill descriptions for tooltips (store translation keys, not English strings).
+    for _, d in ipairs(devices) do
+        d.fullName = d.name
+        -- Make GPU device names compact in the UI so they fit in the column.
+        -- Requested UX: show just GPU0/GPU1 on the buttons; keep full id+name in tooltip.
+        if d.id and (d.id:match("^cuda:%d+$") or d.id:match("^directml:%d+$") or d.type == "cuda" or d.type == "directml") then
+            d.uiName = compactGpuLabel(d.id)
+        else
+            d.uiName = d.name
+        end
+        if d.id == "auto" then
+            d.descKey = "device_auto_desc"
+        elseif d.id == "cpu" then
+            d.descKey = "device_cpu_desc"
+        elseif d.type == "cuda" then
+            d.descKey = "device_cuda_desc"
+        elseif d.type == "directml" then
+            d.descKey = "device_directml_desc"
+        elseif d.type == "mps" then
+            d.descKey = "device_mps_desc"
+        end
+    end
+
+    RUNTIME_DEVICES = devices
+    RUNTIME_DEVICE_NOTE_KEY = buildDeviceNoteFromEnvJson(envJson, devices)
+    RUNTIME_DEVICE_LAST_PROBE = now
+
+    -- If the saved device is no longer available, fall back to auto.
+    local ok = false
+    for _, d in ipairs(RUNTIME_DEVICES) do
+        if d.id == SETTINGS.device then ok = true; break end
+    end
+    if not ok then
+        SETTINGS.device = "auto"
+        saveSettings()
+    end
+end
 
 -- Available models
 local MODELS = {
@@ -319,7 +1005,7 @@ local MODELS = {
 }
 
 -- Settings (persist between runs)
-local SETTINGS = {
+SETTINGS = {
     model = "htdemucs",
     createNewTracks = true,
     createFolder = false,
@@ -335,6 +1021,7 @@ local SETTINGS = {
     parallelProcessing = true, -- Process multiple tracks in parallel (uses more GPU memory)
     language = "en",           -- UI language: en, nl, de
     visualFX = true,           -- Enable/disable visual effects (procedural art backgrounds)
+    tooltips = true,           -- Global tooltip toggle
     device = "auto",           -- Device selection: "auto", "cpu", "cuda:0", "cuda:1", "directml"
 }
 
@@ -362,7 +1049,7 @@ local function loadLanguages()
         debugLog("Language wrapper not found: " .. wrapper_file)
     end
 
-    -- Fallback: parse i18n/languages.lua (which defines `local LANGUAGES = {...}`).
+    -- Fallback: parse i18n/languages.lua (which defines `local LANGUAGES = {..}`).
     local lang_file = script_path .. ".." .. PATH_SEP .. ".." .. PATH_SEP .. "i18n" .. PATH_SEP .. "languages.lua"
     f = io.open(lang_file, "r")
     if f then
@@ -421,6 +1108,54 @@ local function T(key)
     end
     -- Fallback: return key with underscores replaced by spaces
     return key:gsub("_", " ")
+end
+
+local function trPlural(count, singularKey, pluralKey, singularFallback, pluralFallback)
+    if (count or 0) == 1 then
+        return T(singularKey) or singularFallback or singularKey
+    end
+    return T(pluralKey) or pluralFallback or pluralKey
+end
+
+-- Forward declare GUI so early helpers (e.g. handleArtAdvance) can reference it safely.
+local GUI
+
+local MIN_TRACK_HEIGHT = 72
+
+local function ensureTrackHeight(track)
+    if not (track and reaper.ValidatePtr(track, "MediaTrack*")) then return end
+    local current = reaper.GetMediaTrackInfo_Value(track, "I_HEIGHTOVERRIDE") or 0
+    if current < MIN_TRACK_HEIGHT then
+        reaper.SetMediaTrackInfo_Value(track, "I_HEIGHTOVERRIDE", MIN_TRACK_HEIGHT)
+    end
+end
+
+local function adjustTrackLayout()
+    if reaper.TrackList_AdjustWindows then
+        reaper.TrackList_AdjustWindows(false)
+    end
+    reaper.UpdateArrange()
+end
+
+local function handleArtAdvance(state, mouseDown, char)
+    state = state or {}
+    local uiClicked = (GUI and GUI.uiClickedThisFrame) or false
+    if char == 32 then
+        generateNewArt()
+        return
+    end
+    if mouseDown and not state.artMouseDown then
+        state.artMouseDown = true
+        state.artClickBlocked = uiClicked
+    elseif not mouseDown and state.artMouseDown then
+        if not state.artClickBlocked and not uiClicked then
+            generateNewArt()
+        end
+        state.artMouseDown = false
+        state.artClickBlocked = nil
+    elseif mouseDown and state.artMouseDown and uiClicked then
+        state.artClickBlocked = true
+    end
 end
 
 -- Get list of available languages
@@ -487,7 +1222,7 @@ end
 updateTheme()
 
 -- GUI state
-local GUI = {
+GUI = {
     running = false,
     result = nil,
     wasMouseDown = false,
@@ -583,6 +1318,9 @@ local function loadSettings()
     local visualFX = reaper.GetExtState(EXT_SECTION, "visualFX")
     if visualFX ~= "" then SETTINGS.visualFX = (visualFX == "1") end
 
+    local tooltips = reaper.GetExtState(EXT_SECTION, "tooltips")
+    if tooltips ~= "" then SETTINGS.tooltips = (tooltips == "1") end
+
     local device = reaper.GetExtState(EXT_SECTION, "device")
     if device ~= "" then SETTINGS.device = device end
 
@@ -621,7 +1359,7 @@ local function loadSettings()
 end
 
 -- Save settings to ExtState
-local function saveSettings()
+saveSettings = function()
     reaper.SetExtState(EXT_SECTION, "model", SETTINGS.model, true)
     reaper.SetExtState(EXT_SECTION, "createNewTracks", SETTINGS.createNewTracks and "1" or "0", true)
     reaper.SetExtState(EXT_SECTION, "createFolder", SETTINGS.createFolder and "1" or "0", true)
@@ -634,6 +1372,7 @@ local function saveSettings()
     reaper.SetExtState(EXT_SECTION, "darkMode", SETTINGS.darkMode and "1" or "0", true)
     reaper.SetExtState(EXT_SECTION, "parallelProcessing", SETTINGS.parallelProcessing and "1" or "0", true)
     reaper.SetExtState(EXT_SECTION, "visualFX", SETTINGS.visualFX and "1" or "0", true)
+    reaper.SetExtState(EXT_SECTION, "tooltips", SETTINGS.tooltips and "1" or "0", true)
     reaper.SetExtState(EXT_SECTION, "language", SETTINGS.language, true)
     reaper.SetExtState(EXT_SECTION, "device", SETTINGS.device, true)
 
@@ -841,6 +1580,96 @@ local STEM_BORDER_COLORS = {
     {150, 100, 255},  -- Purple (Bass)
     {100, 255, 150},  -- Green (Other)
 }
+
+-- Shared tooltip helpers (used across windows) --------------------------------
+-- We keep tooltips consistent everywhere: wrapped text + stem-color top bar.
+local function _wrapTextToWidth(text, maxWidth)
+    -- Preserve explicit newlines and blank lines, but wrap long lines by words.
+    local out = {}
+    for raw in (tostring(text or "") .. "\n"):gmatch("(.-)\n") do
+        if raw == "" then
+            out[#out + 1] = ""
+        else
+            local line = ""
+            for word in raw:gmatch("%S+") do
+                if line == "" then
+                    line = word
+                else
+                    local candidate = line .. " " .. word
+                    if gfx.measurestr(candidate) <= maxWidth then
+                        line = candidate
+                    else
+                        out[#out + 1] = line
+                        line = word
+                    end
+                end
+            end
+            if line ~= "" then out[#out + 1] = line end
+        end
+    end
+    if #out > 0 and out[#out] == "" then
+        out[#out] = nil
+    end
+    return out
+end
+
+-- Draw a tooltip box with stem-color top bar. Caller must set font before calling.
+-- padding/lineH/maxTextW are already scaled (S/UI/PS).
+local function drawTooltipStyled(tooltipText, tooltipX, tooltipY, winW, winH, padding, lineH, maxTextW)
+    if SETTINGS and SETTINGS.tooltips == false then
+        return
+    end
+    local text = tostring(tooltipText or "")
+    if text == "" then return end
+
+    local maxW = maxTextW or (winW * 0.62)
+    maxW = math.max(50, math.min(maxW, winW - padding * 4))
+    local lines = _wrapTextToWidth(text, maxW)
+    if #lines == 0 then lines = {text} end
+
+    local maxLineW = 0
+    for _, ln in ipairs(lines) do
+        local lw = gfx.measurestr(ln)
+        if lw > maxLineW then maxLineW = lw end
+    end
+
+    local boxW = maxLineW + padding * 2
+    local boxH = (#lines * lineH) + padding * 2
+
+    local tx = tooltipX
+    local ty = tooltipY
+    if tx + boxW > winW then tx = winW - boxW - padding end
+    if ty + boxH > winH then ty = tooltipY - boxH - padding * 2 end
+    if tx < padding then tx = padding end
+    if ty < padding then ty = padding end
+
+    -- Background (theme-aware)
+    gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 0.98)
+    gfx.rect(tx, ty, boxW, boxH, 1)
+
+    -- Colored top border (STEM colors gradient)
+    for i = 0, boxW - 1 do
+        local colorIdx = math.floor(i / boxW * 4) + 1
+        colorIdx = math.min(4, math.max(1, colorIdx))
+        local c = STEM_BORDER_COLORS[colorIdx]
+        gfx.set(c[1]/255, c[2]/255, c[3]/255, 0.9)
+        gfx.line(tx + i, ty, tx + i, ty + 2)
+    end
+
+    -- Border (theme-aware)
+    gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
+    gfx.rect(tx, ty, boxW, boxH, 0)
+
+    -- Text
+    gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
+    local y = ty + padding
+    for _, ln in ipairs(lines) do
+        gfx.x = tx + padding
+        gfx.y = y
+        gfx.drawstr(ln)
+        y = y + lineH
+    end
+end
 
 local STEMWERK_LOGO_LETTERS = {"S", "T", "E", "M", "w", "e", "r", "k"}
 
@@ -1278,7 +2107,7 @@ local function seededRandom(seed, index)
 end
 
 -- Generate new random art with unique procedurally generated name!
-local function generateNewArt()
+function generateNewArt()
     -- Save old art for crossfade transition
     if proceduralArt.seed and proceduralArt.seed ~= 0 then
         proceduralArt.oldSeed = proceduralArt.seed
@@ -2908,7 +3737,7 @@ local function drawProceduralArtInternal(x, y, w, h, time, rotation, skipBackgro
             gfx.circle(dx, dy, dSize, 1, 1)
         end
 
-    -- === PATTERNS 51-100 CONTINUE... ===
+    -- === PATTERNS 51-100 CONTINUE.. ===
 
     -- === BASE PATTERN 51: Smoke ===
     elseif basePattern == 51 then
@@ -3706,12 +4535,15 @@ local function drawArtGallery()
 
     local mx, my = gfx.mouse_x, gfx.mouse_y
     local mouseDown = gfx.mouse_cap & 1 == 1
+    local rightMouseDown = gfx.mouse_cap & 2 == 2
+    local rightMouseDown = gfx.mouse_cap & 2 == 2
     local middleMouseDown = gfx.mouse_cap & 64 == 64  -- Middle mouse button
     local time = os.clock() - artGalleryState.startTime
 
-    -- Tooltip tracking
+    -- Tooltip tracking / UI click tracking for background art click
     local tooltipText = nil
     local tooltipX, tooltipY = 0, 0
+    GUI.uiClickedThisFrame = false
 
     -- === MOUSE WHEEL ZOOM ===
     local mouseWheel = gfx.mouse_wheel
@@ -3785,17 +4617,22 @@ local function drawArtGallery()
             artGalleryState.isDragging = false
         end
 
-        -- Right-click drag = rotate
-        if rightMouseDown and not helpState.isRotating then
+        -- Right-click drag = rotate (ignore top/bottom control areas)
+        local topControlArea = UI(45)
+        local bottomControlArea = UI(60)
+        local bottomY = h - bottomControlArea
+        local rightForArt = rightMouseDown and my >= topControlArea and my <= bottomY
+
+        if rightForArt and not helpState.isRotating then
             helpState.isRotating = true
             helpState.rotateStartX = mx
             helpState.rotateStartY = my
             helpState.rotateStartAngle = helpState.targetRotation
-        elseif rightMouseDown and helpState.isRotating then
+        elseif rightForArt and helpState.isRotating then
             -- Rotation based on horizontal mouse movement
             local dx = mx - helpState.rotateStartX
             helpState.targetRotation = helpState.rotateStartAngle + dx * 0.01
-        elseif not rightMouseDown then
+        elseif not rightForArt then
             helpState.isRotating = false
         end
 
@@ -3913,38 +4750,60 @@ local function drawArtGallery()
 
     -- Header logo removed (requested): keep only tabs + controls.
 
-    -- === GALLERY CONTROLS FADE LOGIC ===
-    -- For Gallery tab (4), fade out controls when mouse is not near them
+    -- === CONTROLS FADE LOGIC (all Help tabs) ===
+    -- Fade out tabs + top-right icons + Back button when the mouse is not hovering near them.
     local controlsOpacity = 1.0
-    if helpState.currentTab == 4 then
-        -- Define control areas: top bar (tabs + icons) and bottom (back button)
-        local topControlArea = UI(45)  -- Height of top controls area
-        local bottomControlArea = UI(50)  -- Height of bottom controls area
+    do
+        local topControlArea = UI(45)    -- Tabs + icons live here
+        local bottomControlArea = UI(60) -- Back button + bottom credits/hints
         local bottomY = h - bottomControlArea
 
-        -- Check if mouse is in control areas
         local mouseInControls = (my < topControlArea) or (my > bottomY)
-
-        -- Set target opacity based on mouse position
         helpState.targetControlsOpacity = mouseInControls and 1.0 or 0.0
 
-        -- Smooth interpolation
         local fadeSpeed = mouseInControls and 0.25 or 0.08  -- Faster fade-in, slower fade-out
         helpState.controlsOpacity = helpState.controlsOpacity + (helpState.targetControlsOpacity - helpState.controlsOpacity) * fadeSpeed
-
-        -- Clamp
         helpState.controlsOpacity = math.max(0, math.min(1, helpState.controlsOpacity))
         controlsOpacity = helpState.controlsOpacity
     end
     local tabs = {T("help_welcome"), T("help_quickstart"), T("help_stems"), T("help_gallery"), T("help_about")}
+
+    -- Reserve space for the top-right controls so tabs never overlap EN/FX.
+    local iconScale = 0.66
+    local themeSize = math.max(UI(14), math.floor(UI(24) * iconScale + 0.5))
+    local themeX = w - themeSize - UI(10)
+    local themeY = UI(6)
+
+    local langCode = string.upper(SETTINGS.language or "EN")
+    gfx.setfont(1, "Arial", UI(10), string.byte('b'))
+    local langW = gfx.measurestr(langCode)
+    local langX = themeX - langW - UI(12)
+
+    local leftSafe = UI(10)
+    local rightSafe = langX - UI(10)
+    local availableTabsW = math.max(UI(120), rightSafe - leftSafe)
+
+    -- Tab widths (shrink tab font if needed on small windows)
     local tabWidths = {}
     local totalTabW = 0
-    gfx.setfont(1, "Arial", UI(11))
+    local tabFont = UI(11)
+    gfx.setfont(1, "Arial", tabFont)
     for i, tab in ipairs(tabs) do
         tabWidths[i] = gfx.measurestr(tab) + UI(20)
         totalTabW = totalTabW + tabWidths[i]
     end
-    local tabStartX = (w - totalTabW) / 2
+    if totalTabW > availableTabsW then
+        tabFont = UI(10)
+        gfx.setfont(1, "Arial", tabFont)
+        totalTabW = 0
+        for i, tab in ipairs(tabs) do
+            tabWidths[i] = gfx.measurestr(tab) + UI(18)
+            totalTabW = totalTabW + tabWidths[i]
+        end
+    end
+
+    local desiredTabStartX = (w - totalTabW) / 2
+    local tabStartX = math.min(math.max(desiredTabStartX, leftSafe), rightSafe - totalTabW)
     local tabX = tabStartX
     local tabHovers = {}
     local clickedTab = nil
@@ -3989,9 +4848,6 @@ local function drawArtGallery()
     end
 
     -- === THEME TOGGLE (top right) - uses UI(), does NOT zoom ===
-    local themeSize = UI(24)
-    local themeX = w - themeSize - UI(10)
-    local themeY = UI(6)
     local themeHover = mx >= themeX and mx <= themeX + themeSize and my >= themeY and my <= themeY + themeSize
 
     if SETTINGS.darkMode then
@@ -4025,10 +4881,10 @@ local function drawArtGallery()
 
     -- === LANGUAGE TOGGLE (next to theme) - uses UI(), does NOT zoom ===
     local langCode = string.upper(SETTINGS.language or "EN")
-    gfx.setfont(1, "Arial", UI(12), string.byte('b'))
+    gfx.setfont(1, "Arial", UI(10), string.byte('b'))
     local langW = gfx.measurestr(langCode)
     local langX = themeX - langW - UI(12)
-    local langY = themeY + UI(5)
+    local langY = themeY + UI(6)
     local langHover = mx >= langX - UI(4) and mx <= langX + langW + UI(4) and my >= langY - UI(3) and my <= langY + UI(16)
 
     -- Draw language badge background
@@ -4036,7 +4892,7 @@ local function drawArtGallery()
         gfx.set(0.3, 0.4, 0.6, 0.5 * controlsOpacity)
         gfx.rect(langX - UI(4), langY - UI(2), langW + UI(8), UI(18), 1)
     end
-    gfx.set(0.5, 0.7, 1.0, (langHover and 1 or 0.7) * controlsOpacity)
+    gfx.set(0.5, 0.7, 1.0, (langHover and 1 or 0.75) * controlsOpacity)
     gfx.x = langX
     gfx.y = langY
     gfx.drawstr(langCode)
@@ -4045,6 +4901,11 @@ local function drawArtGallery()
     if langHover and controlsOpacity > 0.3 then
         tooltipText = T("tooltip_change_language")
         tooltipX, tooltipY = mx + UI(10), my + UI(15)
+    end
+
+    if langHover and (gfx.mouse_cap & 2 == 2) and not helpState.wasRightMouseDown and controlsOpacity > 0.3 then
+        SETTINGS.tooltips = not SETTINGS.tooltips
+        saveSettings()
     end
 
     if langHover and mouseDown and not helpState.wasMouseDown and controlsOpacity > 0.3 then
@@ -4059,7 +4920,7 @@ local function drawArtGallery()
     end
 
     -- === FX TOGGLE (below theme icon) - uses UI(), does NOT zoom ===
-    local fxSize = UI(20)
+    local fxSize = math.max(UI(12), math.floor(UI(20) * iconScale + 0.5))
     local fxX = themeX + (themeSize - fxSize) / 2  -- Center under theme icon
     local fxY = themeY + themeSize + UI(4)
     local fxHover = mx >= fxX - UI(2) and mx <= fxX + fxSize + UI(2) and my >= fxY - UI(2) and my <= fxY + fxSize + UI(2)
@@ -4075,7 +4936,7 @@ local function drawArtGallery()
     end
 
     -- Draw "FX" text
-    gfx.setfont(1, "Arial", UI(11), string.byte('b'))
+    gfx.setfont(1, "Arial", math.max(UI(8), math.floor(UI(11) * iconScale + 0.5)), string.byte('b'))
     local fxText = "FX"
     local fxTextW = gfx.measurestr(fxText)
     gfx.x = fxX + (fxSize - fxTextW) / 2
@@ -5199,57 +6060,17 @@ local function drawArtGallery()
             featureY = featureY + featureSpacing
         end
 
-        -- Keyboard shortcuts section - FIXED position bottom-left, uses UI() (no zoom)
-        local shortcutX = UI(15)
-        local shortcutY = h - UI(90)
-
-        gfx.setfont(1, "Arial", UI(12), string.byte('b'))
-        gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 0.9)
-        gfx.x = shortcutX
-        gfx.y = shortcutY
-        gfx.drawstr(T("keyboard_shortcuts"))
-
-        local shortcuts = {
-            {"F1", T("open_help")},
-            {"ESC", T("close_cancel")},
-            {"Enter", T("start_STEMwerk")},
-        }
-        gfx.setfont(1, "Arial", UI(10))
-        local scY = shortcutY + UI(18)
-        for _, sc in ipairs(shortcuts) do
-            gfx.set(stemColors[2][1], stemColors[2][2], stemColors[2][3], 0.9)
-            gfx.x = shortcutX
-            gfx.y = scY
-            gfx.drawstr(sc[1])
-            gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-            gfx.x = shortcutX + UI(50)
-            gfx.y = scY
-            gfx.drawstr(sc[2])
-            scY = scY + UI(16)
-        end
-
-        -- Version info (bottom right with orange flarkAUDIO) - uses UI(), does NOT zoom
-        gfx.setfont(1, "Arial", UI(10))
-        local versionPart = "STEMwerk v" .. APP_VERSION .. " - "
-        local flarkPart = "flarkAUDIO"
-        local vpW = gfx.measurestr(versionPart)
-        local fpW = gfx.measurestr(flarkPart)
-        local totalVW = vpW + fpW
-        local vX = w - totalVW - UI(10)
-        local vY = h - UI(18)  -- Bottom right corner
-        -- Version text
-        gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 0.8)
-        gfx.x = vX
-        gfx.y = vY
-        gfx.drawstr(versionPart)
-        -- flarkAUDIO in orange
-        gfx.set(1.0, 0.6, 0.2, 1)
-        gfx.x = vX + vpW
-        gfx.y = vY
-        gfx.drawstr(flarkPart)
+        -- Version removed from Welcome (requested).
 
     elseif helpState.currentTab == 2 then
         -- === QUICK START TAB + AUDIO REACTIVE ===
+
+        -- Add subtle procedural art background (requested) - gated by FX toggle
+        if SETTINGS.visualFX then
+            local artAreaY = UI(40)
+            local artAreaH = h - artAreaY - UI(50)
+            drawProceduralArtInternal(0, artAreaY, w, artAreaH, time * 0.6, 0, false, 0.22)
+        end
 
         -- Update audio reactivity
         updateAudioReactivity()
@@ -5864,40 +6685,10 @@ local function drawArtGallery()
         gfx.drawstr(subtitle)
 
         contentY = contentY + PS(24)
+        -- Give the tab title/subtitle area a bit more breathing room before "Features".
+        contentY = contentY + PS(10)
 
-        -- Credits section (Conceived first, then Created with, then Powered by)
-        gfx.setfont(1, "Arial", PS(10))
-
-        -- Conceived by flarkAUDIO
-        gfx.setfont(1, "Arial", PS(10))
-        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-        local conceivedBy = T("about_conceived") .. " "
-        local conceivedW = gfx.measurestr(conceivedBy)
-        local flarkName = "flarkAUDIO"
-        local flarkW = gfx.measurestr(flarkName)
-        gfx.x = centerX - (conceivedW + flarkW) / 2
-        gfx.y = contentY
-        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-        gfx.drawstr(conceivedBy)
-        gfx.set(1.0, 0.5, 0.3, 1)  -- flark orange
-        gfx.drawstr(flarkName)
-
-        contentY = contentY + PS(18)
-
-        -- Powered by Meta's Demucs
-        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-        local poweredBy = T("about_powered_by") .. " "
-        local poweredW = gfx.measurestr(poweredBy)
-        local demucsName = T("about_demucs")
-        local demucsW = gfx.measurestr(demucsName)
-        gfx.x = centerX - (poweredW + demucsW) / 2
-        gfx.y = contentY
-        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-        gfx.drawstr(poweredBy)
-        gfx.set(0.3, 0.7, 1.0, 1)  -- Meta blue
-        gfx.drawstr(demucsName)
-
-        contentY = contentY + PS(24)
+        -- (Credits moved to bottom corners - see after content section)
 
         -- Features section
         gfx.setfont(1, "Arial", PS(12), string.byte('b'))
@@ -5910,7 +6701,7 @@ local function drawArtGallery()
 
         contentY = contentY + PS(20)
 
-        -- Feature list (centered)
+        -- Feature list (centered per line)
         gfx.setfont(1, "Arial", PS(10))
         local features = {
             {color = stemColors[1], text = T("about_feature_1")},
@@ -5923,34 +6714,60 @@ local function drawArtGallery()
         local bullet = "●"
         local bulletW = gfx.measurestr(bullet)
         local gap = PS(10)
-        local maxTextW = 0
-        for _, feat in ipairs(features) do
-            maxTextW = math.max(maxTextW, gfx.measurestr(feat.text))
-        end
-        local listStartX = centerX - (bulletW + gap + maxTextW) / 2
 
         for _, feat in ipairs(features) do
+            local textW = gfx.measurestr(feat.text)
+            local lineW = bulletW + gap + textW
+            local x0 = centerX - lineW / 2
             gfx.set(feat.color[1], feat.color[2], feat.color[3], 0.8)
-            gfx.x = listStartX
+            gfx.x = x0
             gfx.y = contentY
             gfx.drawstr(bullet)
             gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-            gfx.x = listStartX + bulletW + gap
+            gfx.x = x0 + bulletW + gap
             gfx.drawstr(feat.text)
             contentY = contentY + PS(16)
         end
 
         contentY = contentY + PS(20)
 
-        -- Tip
-        gfx.setfont(1, "Arial", PS(9))
-        local tipPulse = 0.5 + math.sin(time * 2) * 0.2
-        gfx.set(stemColors[5][1], stemColors[5][2], stemColors[5][3], tipPulse)
-        local tipText = T("about_tip")
-        local tipW = gfx.measurestr(tipText)
-        gfx.x = centerX - tipW / 2
-        gfx.y = contentY
-        gfx.drawstr(tipText)
+        -- (Tip removed; replaced by tooltip on the help hint icon)
+
+        -- Bottom credits (left/right corners)
+        do
+            -- Place credits flush at the very bottom edge of the window.
+            local creditY = h - UI(18)
+            gfx.setfont(1, "Arial", UI(10))
+
+            -- Left: Conceived by flarkAUDIO
+            local conceivedBy = (T("about_conceived") or "by") .. " "
+            gfx.x = UI(6)
+            gfx.y = creditY
+            gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 0.85)
+            gfx.drawstr(conceivedBy)
+            local prefixW = gfx.measurestr(conceivedBy)
+            gfx.x = UI(6) + prefixW
+            gfx.y = creditY
+            gfx.set(1.0, 0.5, 0.3, 0.95)  -- flark orange
+            gfx.drawstr("flarkAUDIO")
+
+            -- Right: Powered by Meta's Demucs
+            local poweredBy = (T("about_powered_by") or "Powered by") .. " "
+            local demucsName = (T("about_demucs") or "Meta's Demucs")
+            gfx.setfont(1, "Arial", UI(10))
+            local poweredW = gfx.measurestr(poweredBy)
+            local demucsW = gfx.measurestr(demucsName)
+            local totalW = poweredW + demucsW
+            local x0 = w - totalW - UI(12)
+            gfx.x = x0
+            gfx.y = creditY
+            gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 0.85)
+            gfx.drawstr(poweredBy)
+            gfx.x = x0 + poweredW
+            gfx.y = creditY
+            gfx.set(0.3, 0.7, 1.0, 0.95)  -- Meta blue
+            gfx.drawstr(demucsName)
+        end
 
         -- Click on art generates new art
         if not mouseDown and helpState.wasMouseDown and not helpState.wasDrag then
@@ -5996,50 +6813,48 @@ local function drawArtGallery()
 
     -- Close button tooltip
     if closeHover and controlsOpacity > 0.3 then
-        tooltipText = "Close Help (ESC) | Enter = Start"
+        tooltipText = T("tooltip_help_close")
         tooltipX, tooltipY = mx + UI(10), my - UI(25)
+    end
+
+    -- === HELP HINT ICON (all tabs) ===
+    do
+        local hintSize = UI(18)
+        local hintX = UI(14)
+        local hintY = btnY + (btnH - hintSize) / 2
+        -- On About, place the hint slightly above the Back button (credits live at the very bottom).
+        if helpState.currentTab == 5 then
+            hintY = btnY - UI(22)
+        end
+        local hintHover = mx >= hintX and mx <= hintX + hintSize and my >= hintY and my <= hintY + hintSize
+
+        gfx.set(0.25, 0.25, 0.28, (hintHover and 0.9 or 0.7) * controlsOpacity)
+        gfx.circle(hintX + hintSize / 2, hintY + hintSize / 2, hintSize / 2, 1, 1)
+        gfx.set(1, 1, 1, 0.95 * controlsOpacity)
+        gfx.setfont(1, "Arial", UI(11), string.byte('b'))
+        gfx.x = hintX + UI(6)
+        gfx.y = hintY + UI(2)
+        gfx.drawstr("?")
+
+        if hintHover and controlsOpacity > 0.3 then
+            if helpState.currentTab == 4 then
+                tooltipText = T("help_gallery_controls_tip")
+            elseif helpState.currentTab == 5 then
+                tooltipText = T("help_about_controls_tip")
+            else
+                tooltipText = T("help_text_controls_tip")
+            end
+            tooltipX, tooltipY = mx + UI(10), my - UI(25)
+        end
     end
 
     -- === DRAW TOOLTIP (always on top, with STEM colors) ===
     if tooltipText then
         gfx.setfont(1, "Arial", UI(11))
         local padding = UI(8)
-        local tw = gfx.measurestr(tooltipText) + padding * 2
-        local th = UI(18) + padding * 2
-        local tx = tooltipX
-        local ty = tooltipY
-
-        -- Keep tooltip on screen
-        if tx + tw > w then
-            tx = w - tw - UI(5)
-        end
-        if ty + th > h then
-            ty = tooltipY - th - UI(20)
-        end
-        if ty < 0 then ty = UI(5) end
-
-        -- Background (theme-aware)
-        gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 0.98)
-        gfx.rect(tx, ty, tw, th, 1)
-
-        -- Colored top border (STEM colors gradient)
-        for i = 0, tw - 1 do
-            local colorIdx = math.floor(i / tw * 4) + 1
-            colorIdx = math.min(4, math.max(1, colorIdx))
-            local c = STEM_BORDER_COLORS[colorIdx]
-            gfx.set(c[1]/255, c[2]/255, c[3]/255, 0.9)
-            gfx.line(tx + i, ty, tx + i, ty + 2)
-        end
-
-        -- Border (theme-aware)
-        gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
-        gfx.rect(tx, ty, tw, th, 0)
-
-        -- Text (theme-aware)
-        gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
-        gfx.x = tx + padding
-        gfx.y = ty + padding + UI(2)
-        gfx.drawstr(tooltipText)
+        local lineH = UI(14)
+        local maxTextW = math.min(w * 0.62, UI(520))
+        drawTooltipStyled(tooltipText, tooltipX, tooltipY, w, h, padding, lineH, maxTextW)
     end
 
     gfx.update()
@@ -6051,9 +6866,17 @@ local function drawArtGallery()
         helpState.targetPanY = 0
     end
 
-    -- Helper to reset text zoom and pan
+    -- Helper to reset text zoom and pan (default zoom varies per tab so text fits immediately)
     local function resetTextZoom()
-        helpState.targetTextZoom = 1.0
+        local defaultZoom = 1.0
+        if helpState.currentTab == 1 then
+            defaultZoom = 0.92
+        elseif helpState.currentTab == 2 then
+            defaultZoom = 0.90
+        elseif helpState.currentTab == 3 then
+            defaultZoom = 0.85
+        end
+        helpState.targetTextZoom = defaultZoom
         helpState.targetTextPanX = 0
         helpState.targetTextPanY = 0
     end
@@ -6069,10 +6892,6 @@ local function drawArtGallery()
             helpState.currentTab = clickedTab
             resetCamera()
             resetTextZoom()
-            -- Stems tab needs slightly smaller zoom to fit all content
-            if clickedTab == 3 then
-                helpState.targetTextZoom = 0.85
-            end
             -- Do NOT generate new art when switching tabs
         elseif closeHover and controlsOpacity > 0.3 then
             return "close"
@@ -6389,7 +7208,8 @@ local function drawMessageWindow()
     gfx.rect(0, 0, w, h, 1)
 
     -- Theme toggle button (sun/moon icon, top right)
-    local themeSize = PS(20)
+    local iconScale = 0.66
+    local themeSize = math.max(PS(12), math.floor(PS(20) * iconScale + 0.5))
     local themeX = w - themeSize - PS(10)
     local themeY = PS(8)
     local themeHover = mx >= themeX and mx <= themeX + themeSize and my >= themeY and my <= themeY + themeSize
@@ -6440,6 +7260,11 @@ local function drawMessageWindow()
     gfx.drawstr(langCode)
 
     -- Handle language toggle click
+    local rightMouseDown = gfx.mouse_cap & 2 == 2
+    if langHover and rightMouseDown and not (messageWindowState.wasRightMouseDown or false) then
+        SETTINGS.tooltips = not SETTINGS.tooltips
+        saveSettings()
+    end
     if langHover and mouseDown and not messageWindowState.wasMouseDown then
         -- Cycle through languages: en -> nl -> de -> en
         local langs = {"en", "nl", "de"}
@@ -6453,7 +7278,7 @@ local function drawMessageWindow()
     end
 
     -- === FX TOGGLE (below theme icon) ===
-    local fxSize = PS(16)
+    local fxSize = math.max(PS(10), math.floor(PS(16) * iconScale + 0.5))
     local fxX = themeX + (themeSize - fxSize) / 2
     local fxY = themeY + themeSize + PS(3)
     local fxHover = mx >= fxX - PS(2) and mx <= fxX + fxSize + PS(2) and my >= fxY - PS(2) and my <= fxY + fxSize + PS(2)
@@ -6743,41 +7568,9 @@ local function drawMessageWindow()
     if tooltipText then
         gfx.setfont(1, "Arial", PS(11))
         local padding = PS(8)
-        local tw = gfx.measurestr(tooltipText) + padding * 2
-        local th = PS(18) + padding * 2
-        local tx = tooltipX
-        local ty = tooltipY
-
-        -- Keep tooltip on screen
-        if tx + tw > w then
-            tx = w - tw - PS(5)
-        end
-        if ty + th > h then
-            ty = tooltipY - th - PS(20)
-        end
-
-        -- Background (theme-aware)
-        gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 0.98)
-        gfx.rect(tx, ty, tw, th, 1)
-
-        -- Colored top border (STEM colors gradient)
-        for i = 0, tw - 1 do
-            local colorIdx = math.floor(i / tw * 4) + 1
-            colorIdx = math.min(4, math.max(1, colorIdx))
-            local c = STEM_BORDER_COLORS[colorIdx]
-            gfx.set(c[1]/255, c[2]/255, c[3]/255, 0.9)
-            gfx.line(tx + i, ty, tx + i, ty + 2)
-        end
-
-        -- Border (theme-aware)
-        gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
-        gfx.rect(tx, ty, tw, th, 0)
-
-        -- Text (theme-aware)
-        gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
-        gfx.x = tx + padding
-        gfx.y = ty + padding + PS(2)
-        gfx.drawstr(tooltipText)
+        local lineH = PS(14)
+        local maxTextW = math.min(w * 0.62, PS(520))
+        drawTooltipStyled(tooltipText, tooltipX, tooltipY, w, h, padding, lineH, maxTextW)
     end
 
     gfx.update()
@@ -6792,6 +7585,7 @@ local function drawMessageWindow()
     end
 
     messageWindowState.wasMouseDown = mouseDown
+    messageWindowState.wasRightMouseDown = rightMouseDown
 
     local char = gfx.getchar()
 
@@ -7028,6 +7822,9 @@ end
 
 -- Tooltip helper: set tooltip if mouse is in area
 local function setTooltip(x, y, w, h, text)
+    if SETTINGS and SETTINGS.tooltips == false then
+        return
+    end
     local mx, my = gfx.mouse_x, gfx.mouse_y
     if mx >= x and mx <= x + w and my >= y and my <= y + h then
         GUI.tooltip = text
@@ -7038,6 +7835,9 @@ end
 
 -- Set a rich tooltip for STEMwerk button with colored output stems and target
 local function setRichTooltip(x, y, w, h)
+    if SETTINGS and SETTINGS.tooltips == false then
+        return
+    end
     local mx, my = gfx.mouse_x, gfx.mouse_y
     if mx >= x and mx <= x + w and my >= y and my <= y + h then
         GUI.richTooltip = true
@@ -7050,6 +7850,9 @@ end
 -- shortcut: the key (e.g. "K", "V", "1")
 -- color: RGB table for the shortcut color (e.g. {255, 100, 100})
 local function setTooltipWithShortcut(x, y, w, h, text, shortcut, color)
+    if SETTINGS and SETTINGS.tooltips == false then
+        return
+    end
     local mx, my = gfx.mouse_x, gfx.mouse_y
     if mx >= x and mx <= x + w and my >= y and my <= y + h then
         GUI.shortcutTooltip = {
@@ -7064,6 +7867,12 @@ end
 
 -- Draw the current tooltip (call at end of frame)
 local function drawTooltip()
+    if SETTINGS and SETTINGS.tooltips == false then
+        GUI.tooltip = nil
+        GUI.richTooltip = nil
+        GUI.shortcutTooltip = nil
+        return
+    end
     -- Rich tooltip for STEMwerk button
     if GUI.richTooltip then
         gfx.setfont(1, "Arial", S(10))
@@ -7159,7 +7968,7 @@ local function drawTooltip()
         local valueX = tx + padding + labelColW
         local currentY = ty + padding + S(2)
 
-        -- Header: localized "... STEM..." with colored STEM letters
+        -- Header: localized ".. STEM.." with colored STEM letters
         gfx.setfont(1, "Arial", S(11), string.byte('b'))
         local headerW = gfx.measurestr(headerText)
         local headerX = tx + (tw - headerW) / 2
@@ -7190,7 +7999,7 @@ local function drawTooltip()
         gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 1)
         gfx.x = labelX
         gfx.y = currentY
-        gfx.drawstr("Stems")
+        gfx.drawstr(T("rich_stems_label") or "Stems")
 
         gfx.setfont(1, "Arial", S(10), string.byte('b'))
         local stemX = valueX
@@ -7214,7 +8023,7 @@ local function drawTooltip()
         gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 1)
         gfx.x = labelX
         gfx.y = currentY
-        gfx.drawstr("Selection")
+        gfx.drawstr(T("rich_selection_label") or "Selection")
         gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
         gfx.x = valueX
         gfx.drawstr(selectionText)
@@ -7224,7 +8033,7 @@ local function drawTooltip()
         gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 1)
         gfx.x = labelX
         gfx.y = currentY
-        gfx.drawstr("Takes")
+        gfx.drawstr(T("rich_takes_label") or "Takes")
         if SETTINGS.createTakes then
             gfx.set(0.4, 0.9, 0.5, 1)  -- Green for yes
         else
@@ -7238,7 +8047,7 @@ local function drawTooltip()
         gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 1)
         gfx.x = labelX
         gfx.y = currentY
-        gfx.drawstr("Target")
+        gfx.drawstr(T("rich_target_label") or "Target")
         gfx.set(1.0, 0.6, 0.2, 1)  -- Orange for target (stays colored)
         gfx.x = valueX
         gfx.drawstr(targetText)
@@ -7250,8 +8059,53 @@ local function drawTooltip()
 
         gfx.setfont(1, "Arial", S(11))
         local padding = S(8)
-        local tw = gfx.measurestr(GUI.tooltip) + padding * 2
-        local th = S(18) + padding * 2
+        -- Support multi-line tooltips (our runtime backend notes use newlines).
+        local tooltipText = tostring(GUI.tooltip or "")
+        local function wrapTextToWidth(text, maxWidth)
+            -- Preserve explicit newlines and blank lines, but wrap long lines by words.
+            local out = {}
+            for raw in (tostring(text or "") .. "\n"):gmatch("(.-)\n") do
+                if raw == "" then
+                    out[#out + 1] = ""
+                else
+                    local line = ""
+                    for word in raw:gmatch("%S+") do
+                        if line == "" then
+                            line = word
+                        else
+                            local candidate = line .. " " .. word
+                            if gfx.measurestr(candidate) <= maxWidth then
+                                line = candidate
+                            else
+                                out[#out + 1] = line
+                                line = word
+                            end
+                        end
+                    end
+                    if line ~= "" then out[#out + 1] = line end
+                end
+            end
+            -- Remove the trailing line added by the extra "\n"
+            if #out > 0 and out[#out] == "" then
+                -- keep if original ended with a blank line; otherwise trim one trailing empty
+                out[#out] = nil
+            end
+            return out
+        end
+
+        -- Cap tooltip width and wrap text so tooltips don't span the whole window.
+        local maxTextW = math.floor(math.min(gfx.w * 0.62, S(520)))
+        maxTextW = math.max(S(180), maxTextW)
+        local lines = wrapTextToWidth(tooltipText, maxTextW)
+
+        local maxLineW = 0
+        for _, line in ipairs(lines) do
+            local w = gfx.measurestr(line)
+            if w > maxLineW then maxLineW = w end
+        end
+        local lineH = gfx.texth + S(2)
+        local tw = maxLineW + padding * 2
+        local th = (lineH * #lines) + padding * 2 + S(2)
         local tx = GUI.tooltipX
         local ty = GUI.tooltipY
 
@@ -7282,9 +8136,14 @@ local function drawTooltip()
 
         -- Text (theme-aware)
         gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
-        gfx.x = tx + padding
-        gfx.y = ty + padding + S(2)
-        gfx.drawstr(GUI.tooltip)
+        local x = tx + padding
+        local y = ty + padding + S(2)
+        for _, line in ipairs(lines) do
+            gfx.x = x
+            gfx.y = y
+            gfx.drawstr(line)
+            y = y + lineH
+        end
 
         -- Clear tooltip for next frame
         GUI.tooltip = nil
@@ -7352,7 +8211,7 @@ local function fitTextToBox(text, availableW, baseFontSize, minFontSize)
         gfx.setfont(1, "Arial", fontSize)
         tw = gfx.measurestr(text)
         if tw > availableW then
-            local ell = "..."
+            local ell = ".."
             local ellW = gfx.measurestr(ell)
             local maxW = math.max(0, availableW - ellW)
             local n = #text
@@ -7381,6 +8240,8 @@ local function drawCheckbox(x, y, checked, label, r, g, b, fixedW, fontSizeOverr
     local mx, my = gfx.mouse_x, gfx.mouse_y
     local mouseDown = gfx.mouse_cap & 1 == 1
     local hover = mx >= x and mx <= x + boxW and my >= y and my <= y + boxH
+
+    if hover then GUI.uiClickedThisFrame = true end
 
     if mouseDown and hover then
         if not GUI.wasMouseDown then clicked = true end
@@ -7417,6 +8278,331 @@ local function drawCheckbox(x, y, checked, label, r, g, b, fixedW, fontSizeOverr
     return clicked, boxW
 end
 
+local function drawColumnHeader(text, x, width, fontSize, y)
+    fontSize = fontSize or S(10)
+    y = y or 0
+    gfx.setfont(1, "Arial", fontSize)
+    local label = text or ""
+    local padding = S(2)
+    local minFontSize = math.max(S(8), fontSize - S(3))
+    local labelText, tw, usedFontSize = fitTextToBox(label, (width or 0) - padding * 2, fontSize, minFontSize)
+    gfx.x = x + (width - tw) / 2
+    gfx.y = y
+    gfx.drawstr(labelText)
+    if usedFontSize ~= fontSize then
+        gfx.setfont(1, "Arial", fontSize)
+    end
+end
+
+function drawResultWindowControls(ctx)
+    local w, PS = ctx.w, ctx.PS
+    local mx, my, mouseDown = ctx.mx, ctx.my, ctx.mouseDown
+    local tooltipText = ctx.tooltipText
+    local tooltipX = ctx.tooltipX
+    local tooltipY = ctx.tooltipY
+
+    local iconScale = 0.66
+    local themeSize = math.max(PS(12), math.floor(PS(20) * iconScale + 0.5))
+    local themeX = w - themeSize - PS(10)
+    local themeY = PS(8)
+    local themeHover = mx >= themeX and mx <= themeX + themeSize and my >= themeY and my <= themeY + themeSize
+
+    if themeHover then GUI.uiClickedThisFrame = true end
+    if fxHover then GUI.uiClickedThisFrame = true end
+    if langHover then GUI.uiClickedThisFrame = true end
+
+    if SETTINGS.darkMode then
+        gfx.set(0.7, 0.7, 0.5, themeHover and 1 or 0.6)
+        gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/2 - 2, 1, 1)
+        gfx.set(0, 0, 0, 1)
+        gfx.circle(themeX + themeSize/2 + 4, themeY + themeSize/2 - 3, themeSize/2 - 3, 1, 1)
+    else
+        gfx.set(0.9, 0.7, 0.2, themeHover and 1 or 0.8)
+        gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/3, 1, 1)
+        for i = 0, 7 do
+            local angle = i * math.pi / 4
+            local x1 = themeX + themeSize/2 + math.cos(angle) * (themeSize/3 + 2)
+            local y1 = themeY + themeSize/2 + math.sin(angle) * (themeSize/3 + 2)
+            local x2 = themeX + themeSize/2 + math.cos(angle) * (themeSize/2 - 1)
+            local y2 = themeY + themeSize/2 + math.sin(angle) * (themeSize/2 - 1)
+            gfx.line(x1, y1, x2, y2)
+        end
+    end
+
+    if themeHover and mouseDown and not resultWindowState.wasMouseDown then
+        SETTINGS.darkMode = not SETTINGS.darkMode
+        updateTheme()
+        saveSettings()
+    end
+    if themeHover then
+        tooltipText = SETTINGS.darkMode and (T("switch_light") or "Switch to light mode") or (T("switch_dark") or "Switch to dark mode")
+        tooltipX, tooltipY = mx + PS(10), my + PS(15)
+    end
+
+    local fxSize = math.max(PS(10), math.floor(PS(16) * iconScale + 0.5))
+    local fxX = themeX + (themeSize - fxSize) / 2
+    local fxY = themeY + themeSize + PS(3)
+    local fxHover = mx >= fxX - PS(2) and mx <= fxX + fxSize + PS(2) and my >= fxY - PS(2) and my <= fxY + fxSize + PS(2)
+
+    local fxAlpha = fxHover and 1 or 0.7
+    if SETTINGS.visualFX then
+        gfx.set(0.4, 0.9, 0.5, fxAlpha)
+    else
+        gfx.set(0.5, 0.5, 0.5, fxAlpha * 0.6)
+    end
+    gfx.setfont(1, "Arial", PS(9), string.byte('b'))
+    local fxText = "FX"
+    local fxTextW = gfx.measurestr(fxText)
+    gfx.x = fxX + (fxSize - fxTextW) / 2
+    gfx.y = fxY + PS(1)
+    gfx.drawstr(fxText)
+    if SETTINGS.visualFX then
+        gfx.set(1, 1, 0.5, fxAlpha * 0.8)
+        gfx.circle(fxX - PS(1), fxY + PS(2), PS(1.5), 1, 1)
+        gfx.circle(fxX + fxSize, fxY + fxSize - PS(2), PS(1.5), 1, 1)
+    else
+        gfx.set(0.8, 0.3, 0.3, fxAlpha)
+        gfx.line(fxX - PS(1), fxY + fxSize / 2, fxX + fxSize + PS(1), fxY + fxSize / 2)
+    end
+    if fxHover and mouseDown and not resultWindowState.wasMouseDown then
+        SETTINGS.visualFX = not SETTINGS.visualFX
+        saveSettings()
+    end
+    if fxHover then
+        tooltipText = SETTINGS.visualFX and (T("fx_disable") or "Disable visual effects") or (T("fx_enable") or "Enable visual effects")
+        tooltipX, tooltipY = mx + PS(10), my + PS(15)
+    end
+
+    local langW = PS(22)
+    local langH = PS(14)
+    local langX = themeX - langW - PS(6)
+    local langY = themeY + (themeSize - langH) / 2
+    local langHover = mx >= langX and mx <= langX + langW and my >= langY and my <= langY + langH
+
+    gfx.setfont(1, "Arial", PS(9), string.byte('b'))
+    local langCode = string.upper(SETTINGS.language or "EN")
+    local langTextW = gfx.measurestr(langCode)
+
+    if langHover then
+        gfx.set(0.4, 0.6, 0.9, 1)
+        tooltipText = T("tooltip_change_language") or "Click to change language"
+        tooltipX, tooltipY = mx + PS(10), my + PS(15)
+        local rightMouseDown = gfx.mouse_cap & 2 == 2
+        if rightMouseDown and not (resultWindowState.wasRightMouseDown or false) then
+            SETTINGS.tooltips = not SETTINGS.tooltips
+            saveSettings()
+        end
+        if mouseDown and not resultWindowState.wasMouseDown then
+            local langs = {"en", "nl", "de"}
+            local currentIdx = 1
+            for i, l in ipairs(langs) do
+                if l == SETTINGS.language then currentIdx = i; break end
+            end
+            local nextIdx = (currentIdx % #langs) + 1
+            setLanguage(langs[nextIdx])
+            saveSettings()
+        end
+    else
+        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 0.8)
+    end
+    gfx.x = langX + (langW - langTextW) / 2
+    gfx.y = langY
+    gfx.drawstr(langCode)
+
+    ctx.tooltipText = tooltipText
+    ctx.tooltipX = tooltipX
+    ctx.tooltipY = tooltipY
+end
+
+function renderResultTitleArea(ctx)
+    local w, PS = ctx.w, ctx.PS
+    local selectedStems = resultWindowState.selectedStems or {}
+
+    local iconX = w / 2
+    local iconY = PS(60)
+    local iconR = PS(28)
+
+    gfx.set(0.2, 0.65, 0.35, 1)
+    gfx.circle(iconX, iconY, iconR, 1, 1)
+
+    gfx.set(1, 1, 1, 1)
+    local cx, cy = iconX, iconY
+    local x1, y1 = cx - PS(10), cy
+    local x2, y2 = cx - PS(3), cy + PS(8)
+    gfx.line(x1, y1, x2, y2)
+    gfx.line(x1, y1+1, x2, y2+1)
+    local x3, y3 = cx + PS(10), cy - PS(7)
+    gfx.line(x2, y2, x3, y3)
+    gfx.line(x2, y2+1, x3, y3+1)
+
+    gfx.setfont(1, "Arial", PS(18), string.byte('b'))
+    local stemLetterColors = {
+        {255, 100, 100},
+        {100, 200, 255},
+        {150, 100, 255},
+        {100, 255, 150},
+    }
+    local stemPart = "STEM"
+    local restPart = "werk Complete!"
+    local stemW = gfx.measurestr(stemPart)
+    local restW = gfx.measurestr(restPart)
+    local totalW = stemW + restW
+    local titleX = (w - totalW) / 2
+    local titleY = PS(100)
+
+    local charX = titleX
+    for i = 1, 4 do
+        local char = stemPart:sub(i, i)
+        local color = stemLetterColors[i]
+        gfx.set(color[1]/255, color[2]/255, color[3]/255, 1)
+        gfx.x = charX
+        gfx.y = titleY
+        gfx.drawstr(char)
+        charX = charX + gfx.measurestr(char)
+    end
+
+    gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
+    gfx.x = charX
+    gfx.y = titleY
+    gfx.drawstr(restPart)
+
+    local stemY = PS(125)
+    local stemBoxSize = PS(14)
+    gfx.setfont(1, "Arial", PS(11))
+    local totalStemWidth = 0
+    for _, stem in ipairs(selectedStems) do
+        totalStemWidth = totalStemWidth + stemBoxSize + gfx.measurestr(stem.name) + PS(16)
+    end
+    local stemX = (w - totalStemWidth) / 2
+    for _, stem in ipairs(selectedStems) do
+        gfx.set(stem.color[1]/255, stem.color[2]/255, stem.color[3]/255, 1)
+        gfx.rect(stemX, stemY, stemBoxSize, stemBoxSize, 1)
+        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+        gfx.x = stemX + stemBoxSize + PS(5)
+        gfx.y = stemY + PS(1)
+        gfx.drawstr(stem.name)
+        stemX = stemX + stemBoxSize + gfx.measurestr(stem.name) + PS(16)
+    end
+
+    local targetY = PS(150)
+    gfx.setfont(1, "Arial", PS(10))
+    gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+    local targetText = (T("complete_target_prefix") or "Target:") .. " "
+    if SETTINGS.createNewTracks then
+        targetText = targetText .. (T("new_tracks") or "New tracks")
+        if SETTINGS.createFolder then
+            targetText = targetText .. " (" .. (T("create_folder") or "Folder") .. ")"
+        end
+    else
+        targetText = targetText .. (T("in_place") or "In-place") .. " (" .. (T("keep_takes") or "Keep takes") .. ")"
+    end
+    if SETTINGS.muteOriginal then
+        targetText = targetText .. " | " .. (T("mute_original") or "Mute orig")
+    elseif SETTINGS.muteSelection then
+        targetText = targetText .. " | " .. (T("mute_selection") or "Mute sel")
+    elseif SETTINGS.deleteOriginal then
+        targetText = targetText .. " | " .. (T("delete_original") or "Delete orig")
+    elseif SETTINGS.deleteSelection then
+        targetText = targetText .. " | " .. (T("delete_selection") or "Delete sel")
+    elseif SETTINGS.deleteOriginalTrack then
+        targetText = targetText .. " | " .. (T("delete_track") or "Del track")
+    end
+    local targetW = gfx.measurestr(targetText)
+    gfx.x = (w - targetW) / 2
+    gfx.y = targetY
+    gfx.drawstr(targetText)
+end
+
+function renderResultMessageBox(ctx)
+    local w, h, PS = ctx.w, ctx.h, ctx.PS
+    local msgBoxY = PS(170)
+    local msgBoxH = PS(70)
+    gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 0.3)
+    gfx.rect(PS(20), msgBoxY, w - PS(40), msgBoxH, 1)
+    gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 0.6)
+    gfx.rect(PS(20), msgBoxY, w - PS(40), msgBoxH, 0)
+
+    gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
+    gfx.setfont(1, "Arial", PS(11))
+    local msgLines = buildResultMessageLines()
+    local msgY = msgBoxY + PS(8)
+    for _, line in ipairs(msgLines) do
+        local lineW = gfx.measurestr(line)
+        gfx.x = (w - lineW) / 2
+        gfx.y = msgY
+        gfx.drawstr(line)
+        msgY = msgY + PS(13)
+    end
+end
+
+function buildResultMessageLines()
+    local data = resultWindowState and resultWindowState.messageData or nil
+    if not data then
+        local msgLines = {}
+        local msg = (resultWindowState and resultWindowState.message) or ""
+        for line in (msg .. "\n"):gmatch("([^\n]*)\n") do
+            table.insert(msgLines, line)
+        end
+        return msgLines
+    end
+
+    -- Dynamic (retranslatable) message
+    local lines = {}
+    local timeStr = string.format("%d:%02d", math.floor((data.totalTimeSec or 0) / 60), (data.totalTimeSec or 0) % 60)
+
+    if data.kind == "multi_new_tracks" then
+        local stemsCreated = data.stemsCreated or 0
+        local srcCount = data.sourceCount or 0
+        local stemWord = trPlural(stemsCreated, "result_stem_track_one", "result_stem_track_many", "stem track", "stem tracks")
+        local srcWord = trPlural(srcCount, "result_source_track_one", "result_source_track_many", "source track", "source tracks")
+        local line1 = string.format(T("result_multi_created") or "%d %s created from %d %s.", stemsCreated, stemWord, srcCount, srcWord)
+
+        local speedStr = string.format("%.2fx", data.realtimeFactor or 0)
+        local modeStr = (data.sequentialMode and (T("sequential") or "Sequential")) or (T("parallel") or "Parallel")
+        local line2 = string.format(T("result_stats") or "Time: %s | Speed: %s realtime | Mode: %s", timeStr, speedStr, modeStr)
+        table.insert(lines, line1)
+        table.insert(lines, line2)
+    elseif data.kind == "multi_in_place" then
+        local itemCount = data.itemCount or 0
+        local itemWord = trPlural(itemCount, "footer_item", "footer_items", "item", "items")
+        local line1 = string.format(T("result_items_replaced") or "%d %s replaced with stems as takes.", itemCount, itemWord)
+        local speedStr = string.format("%.2fx", data.realtimeFactor or 0)
+        local modeStr = (data.sequentialMode and (T("sequential") or "Sequential")) or (T("parallel") or "Parallel")
+        local line2 = string.format(T("result_stats") or "Time: %s | Speed: %s realtime | Mode: %s", timeStr, speedStr, modeStr)
+        table.insert(lines, line1)
+        table.insert(lines, line2)
+    elseif data.kind == "single" then
+        if data.mainKey then
+            if data.mainKey == "result_time_selection_created" or data.mainKey == "result_stems_created_generic" then
+                local count = data.count or 0
+                local trackWord = trPlural(count, "footer_track", "footer_tracks", "track", "tracks")
+                table.insert(lines, string.format(T(data.mainKey) or "%d stem %s created.", count, trackWord))
+            else
+                table.insert(lines, T(data.mainKey) or "")
+            end
+        else
+            table.insert(lines, data.fallback or "")
+        end
+        if data.actionKey then
+            table.insert(lines, T(data.actionKey) or "")
+        end
+        table.insert(lines, string.format(T("result_time_line") or "Time: %s", timeStr))
+    end
+
+    if data.action then
+        local a = data.action
+        if a.kind == "items" then
+            local itemWord = trPlural(a.count or 0, "footer_item", "footer_items", "item", "items")
+            table.insert(lines, string.format(T(a.key) or "", a.count or 0, itemWord))
+        elseif a.kind == "tracks" then
+            local trWord = trPlural(a.count or 0, "footer_track", "footer_tracks", "track", "tracks")
+            table.insert(lines, string.format(T(a.key) or "", a.count or 0, trWord))
+        end
+    end
+
+    return lines
+end
+
 -- Draw a radio button as a toggle box (like stems/presets) and return if it was clicked (scaled)
 -- Optional fixedW parameter to set a fixed width for all boxes
 -- Optional attentionMult: when not selected, draw a subtle accent pulse (used to hint "direct tool" availability)
@@ -7430,6 +8616,8 @@ local function drawRadio(x, y, selected, label, color, fixedW, attentionMult, ic
     local mx, my = gfx.mouse_x, gfx.mouse_y
     local mouseDown = gfx.mouse_cap & 1 == 1
     local hover = mx >= x and mx <= x + boxW and my >= y and my <= y + boxH
+
+    if hover then GUI.uiClickedThisFrame = true end
 
     if mouseDown and hover then
         if not GUI.wasMouseDown then clicked = true end
@@ -7606,11 +8794,11 @@ local function stripExplodePrefix(label)
     label = tostring(label or "")
     -- Replace a leading localized "Explode" word with an icon, so the UI stays compact.
     -- Keep this conservative: only strip when the string clearly starts with the verb.
-    label = label:gsub("^%s*[Ee]xplode%s+", "")      -- EN: Explode ...
-    label = label:gsub("^%s*[Ee]xplodeer%s+", "")    -- NL: Explodeer ...
-    label = label:gsub("^%s*[Ee]xplodieren%s+", "")  -- DE: Explodieren ...
-    label = label:gsub("^%s*[Ee]xploser%s+", "")     -- FR: Exploser ...
-    label = label:gsub("^%s*[Ee]xplotar%s+", "")     -- ES: Explotar ...
+    label = label:gsub("^%s*[Ee]xplode%s+", "")      -- EN: Explode ..
+    label = label:gsub("^%s*[Ee]xplodeer%s+", "")    -- NL: Explodeer ..
+    label = label:gsub("^%s*[Ee]xplodieren%s+", "")  -- DE: Explodieren ..
+    label = label:gsub("^%s*[Ee]xploser%s+", "")     -- FR: Exploser ..
+    label = label:gsub("^%s*[Ee]xplotar%s+", "")     -- ES: Explotar ..
     return label
 end
 
@@ -7715,7 +8903,8 @@ local function getSelectedMultiTakeCountRespectingTimeSelection()
 end
 
 -- Draw a toggle button (like stems) with selected state
-local function drawToggleButton(x, y, w, h, label, selected, color)
+-- Optional fontSizeOverride: when provided, a group of buttons can share the same text size (like Output column).
+local function drawToggleButton(x, y, w, h, label, selected, color, fontSizeOverride)
     local clicked = false
     local mx, my = gfx.mouse_x, gfx.mouse_y
     local mouseDown = gfx.mouse_cap & 1 == 1
@@ -7749,15 +8938,23 @@ local function drawToggleButton(x, y, w, h, label, selected, color)
     gfx.rect(x, y, w, h, 0)
 
     -- Button text
+    -- Keep text readable even when unselected; match Output column readability.
     if selected then
         gfx.set(1, 1, 1, 1)
     else
-        gfx.set(0.6, 0.6, 0.6, 1)
+        gfx.set(1, 1, 1, hover and 0.9 or 0.75)
     end
-    local tw = gfx.measurestr(label)
+    local baseFontSize = fontSizeOverride or S(13)
+    local minFontSize = S(9)
+    local padding = S(4)
+    local labelText, tw, usedFontSize = fitTextToBox(label, w - padding * 2, baseFontSize, minFontSize)
     gfx.x = x + (w - tw) / 2
-    gfx.y = y + (h - S(14)) / 2
-    gfx.drawstr(label)
+    gfx.y = y + (h - usedFontSize) / 2
+    gfx.drawstr(labelText)
+
+    if usedFontSize ~= baseFontSize then
+        gfx.setfont(1, "Arial", baseFontSize)
+    end
 
     return clicked
 end
@@ -7831,6 +9028,13 @@ end
 local function dialogLoop()
     -- Try to make window resizable (needs to be called after window is visible)
     makeWindowResizable()
+
+    -- Non-blocking device probe: update device list as soon as the async probe completes.
+    pollRuntimeDeviceProbe()
+    if DEBUG_MODE and RUNTIME_DEVICE_PROBE_DEBUG == "async_running" and not GUI._probeLoggedOnce then
+        GUI._probeLoggedOnce = true
+        perfMark("dialogLoop(): running while device probe async (UI should remain responsive)")
+    end
 
     -- One-shot focus handoff: keep main dialog visible but give keyboard focus back to REAPER
     -- so the user can press T to switch takes immediately.
@@ -7914,6 +9118,28 @@ local function dialogLoop()
     local mouseDown = gfx.mouse_cap & 1 == 1
     local rightMouseDown = gfx.mouse_cap & 2 == 2
     local mouseWheel = gfx.mouse_wheel
+    local w, h = gfx.w, gfx.h
+
+    -- Precompute top-right control hitboxes early so background RMB rotation doesn't steal UI right-clicks.
+    -- (Needed because the language badge uses RMB to toggle tooltips.)
+    local iconScale = 0.66
+    local themeSize = math.max(S(12), math.floor(S(20) * iconScale + 0.5))
+    local themeX = w - themeSize - S(10)
+    local themeY = S(8)
+    local themeHover = mx >= themeX and mx <= themeX + themeSize and my >= themeY and my <= themeY + themeSize
+
+    local langW = S(22)
+    local langH = S(14)
+    local langX = themeX - langW - S(6)
+    local langY = themeY + (themeSize - langH) / 2
+    local langHover = mx >= langX and mx <= langX + langW and my >= langY and my <= langY + langH
+
+    local fxSize = math.max(S(10), math.floor(S(16) * iconScale + 0.5))
+    local fxX = themeX + (themeSize - fxSize) / 2
+    local fxY = themeY + themeSize + S(3)
+    local fxHover = mx >= fxX - S(2) and mx <= fxX + fxSize + S(2) and my >= fxY - S(2) and my <= fxY + fxSize + S(2)
+
+    local uiRightClickBlock = themeHover or langHover or fxHover
 
     -- === MOUSE INTERACTION FOR BACKGROUND ART ===
 
@@ -7925,7 +9151,8 @@ local function dialogLoop()
     end
 
     -- Right-click drag for rotation
-    if rightMouseDown then
+    -- Ignore RMB rotation when hovering UI controls (language/theme/FX), so those RMB actions are reliable.
+    if rightMouseDown and not uiRightClickBlock then
         if not mainDialogArt.wasRightMouseDown then
             -- Start rotation
             mainDialogArt.isRotating = true
@@ -7978,7 +9205,6 @@ local function dialogLoop()
     end
 
     -- Draw full-window background first - pure black/white
-    local w, h = gfx.w, gfx.h
     if SETTINGS.darkMode then
         gfx.set(0, 0, 0, 1)
     else
@@ -8003,15 +9229,8 @@ local function dialogLoop()
     end
     gfx.rect(0, 0, w, h, 1)
 
-    -- Track mouse state for next frame
-    mainDialogArt.wasMouseDown = mouseDown
-    mainDialogArt.wasRightMouseDown = rightMouseDown
-
     -- Theme toggle button (sun/moon icon)
-    local themeSize = S(20)
-    local themeX = gfx.w - themeSize - S(10)
-    local themeY = S(8)
-    local themeHover = mx >= themeX and mx <= themeX + themeSize and my >= themeY and my <= themeY + themeSize
+    -- NOTE: themeX/themeY/themeSize/themeHover already computed early (used to block RMB art-rotation)
 
     -- Draw theme toggle (circle with rays for sun, crescent for moon)
     if SETTINGS.darkMode then
@@ -8047,11 +9266,7 @@ local function dialogLoop()
     end
 
     -- Language toggle button (small text showing current language)
-    local langW = S(22)
-    local langH = S(14)
-    local langX = themeX - langW - S(6)
-    local langY = themeY + (themeSize - langH) / 2
-    local langHover = mx >= langX and mx <= langX + langW and my >= langY and my <= langY + langH
+    -- NOTE: langX/langY/langW/langH/langHover already computed early (used to block RMB art-rotation)
 
     -- Draw language indicator
     gfx.setfont(1, "Arial", S(9), string.byte('b'))
@@ -8070,6 +9285,10 @@ local function dialogLoop()
     -- Handle language toggle click
     if langHover then
         setTooltip(langX, langY, langW, langH, T("tooltip_change_language"))
+        if rightMouseDown and not mainDialogArt.wasRightMouseDown then
+            SETTINGS.tooltips = not SETTINGS.tooltips
+            saveSettings()
+        end
         if mouseDown and not GUI.wasMouseDown then
             -- Cycle through languages: en -> nl -> de -> en
             local langs = {"en", "nl", "de"}
@@ -8084,10 +9303,7 @@ local function dialogLoop()
     end
 
     -- === FX TOGGLE (below theme icon) ===
-    local fxSize = S(16)
-    local fxX = themeX + (themeSize - fxSize) / 2
-    local fxY = themeY + themeSize + S(3)
-    local fxHover = mx >= fxX - S(2) and mx <= fxX + fxSize + S(2) and my >= fxY - S(2) and my <= fxY + fxSize + S(2)
+    -- NOTE: fxX/fxY/fxSize/fxHover already computed early (used to block RMB art-rotation)
 
     local fxAlpha = fxHover and 1 or 0.7
     if SETTINGS.visualFX then
@@ -8153,7 +9369,9 @@ local function dialogLoop()
     -- Content starts below logo
     local contentTop = S(45)
 
+    -- Base font for the main window (controls).
     gfx.setfont(1, "Arial", S(13))
+    local mainHeaderFont = S(10) -- uniform column headers (Presets/Stems/Model/Device/Output) - balanced size
 
     -- Determine 6-stem mode early (needed for stem display)
     local is6Stem = (SETTINGS.model == "htdemucs_6s")
@@ -8178,53 +9396,70 @@ local function dialogLoop()
 
     -- === COLUMN 1: Presets ===
     gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-    gfx.x = col1X
-    gfx.y = contentTop
-    gfx.drawstr(T("presets"))
+    drawColumnHeader(T("presets"), col1X, presetsW, mainHeaderFont, contentTop)
+
+    -- Uniform per column: preset button labels share a stable font size (and always fit).
+    local presetLabelKaraoke = (T("karaoke") or "Karaoke") .. " (K)"
+    local presetLabelAll = (T("all_stems") or "All") .. " (A)"
+    local presetLabelVocals = (T("vocals") or "Vocals") .. " (V)"
+    local presetLabelDrums = (T("drums") or "Drums") .. " (D)"
+    local presetLabelBass = (T("bass") or "Bass") .. " (B)"
+    local presetLabelOther = (T("other") or "Other") .. " (O)"
+    local presetLabelPiano = (T("piano") or "Piano") .. " (P)"
+    local presetLabelGuitar = (T("guitar") or "Guitar") .. " (G)"
+    local presetLabels = { presetLabelKaraoke, presetLabelAll, presetLabelVocals, presetLabelDrums, presetLabelBass, presetLabelOther }
+    if is6Stem then
+        presetLabels[#presetLabels + 1] = presetLabelPiano
+        presetLabels[#presetLabels + 1] = presetLabelGuitar
+    end
+    local presetsColFontSize = getUniformFontSizeCached("main_presets_col", presetLabels, colW)
+    -- Use one consistent button label font size across ALL columns (matches Presets).
+    -- Other columns can still shrink per-button via fitTextToBox when needed.
+    local commonBtnFontSize = presetsColFontSize
 
     local presetY = contentTop + S(20)
+    gfx.setfont(1, "Arial", S(13))
 
     -- Combo presets first (most common use cases)
-    if drawButton(col1X, presetY, colW, btnH, "Karaoke (K)", false, {80, 80, 90}, presetsColFontSize) then applyPresetKaraoke() end
+    if drawButton(col1X, presetY, colW, btnH, presetLabelKaraoke, false, {80, 80, 90}, commonBtnFontSize) then applyPresetKaraoke() end
     setTooltipWithShortcut(col1X, presetY, colW, btnH, T("tooltip_preset_karaoke"), "K", {255, 200, 100})
     presetY = presetY + S(22)
-    if drawButton(col1X, presetY, colW, btnH, "All (A)", false, {80, 80, 90}, presetsColFontSize) then applyPresetAll() end
+    if drawButton(col1X, presetY, colW, btnH, presetLabelAll, false, {80, 80, 90}, commonBtnFontSize) then applyPresetAll() end
     setTooltipWithShortcut(col1X, presetY, colW, btnH, T("tooltip_preset_all"), "A", {255, 200, 100})
 
     -- Separator
     presetY = presetY + S(28)
 
     -- Stem presets (colored by stem)
-    if drawButton(col1X, presetY, colW, btnH, "Vocals (V)", false, {255, 100, 100}, presetsColFontSize) then applyPresetVocalsOnly() end
+    if drawButton(col1X, presetY, colW, btnH, presetLabelVocals, false, {255, 100, 100}, commonBtnFontSize) then applyPresetVocalsOnly() end
     setTooltipWithShortcut(col1X, presetY, colW, btnH, T("tooltip_preset_vocals"), "V", {255, 100, 100})
     presetY = presetY + S(22)
-    if drawButton(col1X, presetY, colW, btnH, "Drums (D)", false, {100, 200, 255}, presetsColFontSize) then applyPresetDrumsOnly() end
+    if drawButton(col1X, presetY, colW, btnH, presetLabelDrums, false, {100, 200, 255}, commonBtnFontSize) then applyPresetDrumsOnly() end
     setTooltipWithShortcut(col1X, presetY, colW, btnH, T("tooltip_preset_drums"), "D", {100, 200, 255})
     presetY = presetY + S(22)
-    if drawButton(col1X, presetY, colW, btnH, "Bass (B)", false, {150, 100, 255}, presetsColFontSize) then applyPresetBassOnly() end
+    if drawButton(col1X, presetY, colW, btnH, presetLabelBass, false, {150, 100, 255}, commonBtnFontSize) then applyPresetBassOnly() end
     setTooltipWithShortcut(col1X, presetY, colW, btnH, T("tooltip_preset_bass"), "B", {150, 100, 255})
     presetY = presetY + S(22)
-    if drawButton(col1X, presetY, colW, btnH, "Other (O)", false, {100, 255, 150}, presetsColFontSize) then applyPresetOtherOnly() end
+    if drawButton(col1X, presetY, colW, btnH, presetLabelOther, false, {100, 255, 150}, commonBtnFontSize) then applyPresetOtherOnly() end
     setTooltipWithShortcut(col1X, presetY, colW, btnH, T("tooltip_preset_other"), "O", {100, 255, 150})
     presetY = presetY + S(22)
 
     -- Piano and Guitar only show for 6-stem model
     if is6Stem then
-        if drawButton(col1X, presetY, colW, btnH, "Piano (P)", false, {255, 120, 200}, presetsColFontSize) then applyPresetPianoOnly() end
+        if drawButton(col1X, presetY, colW, btnH, presetLabelPiano, false, {255, 120, 200}, commonBtnFontSize) then applyPresetPianoOnly() end
         setTooltipWithShortcut(col1X, presetY, colW, btnH, T("tooltip_preset_piano"), "P", {255, 120, 200})
         presetY = presetY + S(22)
-        if drawButton(col1X, presetY, colW, btnH, "Guitar (G)", false, {255, 180, 100}, presetsColFontSize) then applyPresetGuitarOnly() end
+        if drawButton(col1X, presetY, colW, btnH, presetLabelGuitar, false, {255, 180, 100}, commonBtnFontSize) then applyPresetGuitarOnly() end
         setTooltipWithShortcut(col1X, presetY, colW, btnH, T("tooltip_preset_guitar"), "G", {255, 180, 100})
         presetY = presetY + S(22)
     end
 
     -- === COLUMN 2: Stems ===
     gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-    gfx.x = col2X
-    gfx.y = contentTop
-    gfx.drawstr(is6Stem and T("stems_6") or T("stems"))
+    drawColumnHeader(is6Stem and T("stems_6") or T("stems"), col2X, stemsW, mainHeaderFont, contentTop)
 
     local stemY = contentTop + S(20)
+    gfx.setfont(1, "Arial", S(13))
     -- Map stem names to translation keys
     local stemTooltipKeys = {
         Vocals = "tooltip_stem_vocals",
@@ -8234,10 +9469,23 @@ local function dialogLoop()
         Guitar = "tooltip_stem_guitar",
         Piano = "tooltip_stem_piano"
     }
+    -- Uniform per column: stem labels share a stable font size and always fit the button.
+    local stemLabels = {}
+    for _, st in ipairs(STEMS) do
+        if not st.sixStemOnly or is6Stem then
+            local k = tostring(st.name or ""):lower()
+            local dn = T(k) or st.name
+            stemLabels[#stemLabels + 1] = tostring(dn) .. " (" .. st.key .. ")"
+        end
+    end
+    local stemsColFontSize = getUniformFontSizeCached("main_stems_col", stemLabels, colW)
+
     for i, stem in ipairs(STEMS) do
         if not stem.sixStemOnly or is6Stem then
-            local label = stem.name .. " (" .. stem.key .. ")"
-            if drawToggleButton(col2X, stemY, colW, btnH, label, stem.selected, stem.color) then
+            local k = tostring(stem.name or ""):lower()
+            local displayName = T(k) or stem.name
+            local label = tostring(displayName) .. " (" .. stem.key .. ")"
+            if drawToggleButton(col2X, stemY, colW, btnH, label, stem.selected, stem.color, commonBtnFontSize) then
                 STEMS[i].selected = not STEMS[i].selected
             end
             local tooltipKey = stemTooltipKeys[stem.name] or "tooltip_stem_other"
@@ -8248,9 +9496,8 @@ local function dialogLoop()
 
     -- === COLUMN 3: Model ===
     gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-    gfx.x = col3X
-    gfx.y = contentTop
-    gfx.drawstr(T("model"))
+    drawColumnHeader(T("model"), col3X, modelColW, mainHeaderFont, contentTop)
+    gfx.setfont(1, "Arial", S(13))
 
     -- Fixed width for all Model column boxes
     local modelBoxW = modelColW
@@ -8272,7 +9519,7 @@ local function dialogLoop()
         htdemucs_6s = "model_6stem_desc",
     }
     for _, model in ipairs(MODELS) do
-        if drawRadio(col3X, modelY, SETTINGS.model == model.id, model.name, nil, modelBoxW, nil, nil, modelColFontSize) then
+        if drawRadio(col3X, modelY, SETTINGS.model == model.id, model.name, nil, modelBoxW, nil, nil, commonBtnFontSize) then
             SETTINGS.model = model.id
         end
         local descKey = modelDescKeys[model.id] or "model_fast_desc"
@@ -8280,30 +9527,29 @@ local function dialogLoop()
         modelY = modelY + S(22)
     end
 
-    -- Processing mode
+    -- Processing mode (single toggle button: Parallel ↔ Sequential)
     modelY = modelY + S(8)
-    local parallelColor = SETTINGS.parallelProcessing and {100, 180, 255} or {160, 160, 160}
-    local parallelLabel = SETTINGS.parallelProcessing and T("parallel") or T("sequential")
-    if drawCheckbox(col3X, modelY, SETTINGS.parallelProcessing, parallelLabel, parallelColor[1], parallelColor[2], parallelColor[3], modelBoxW, modelColFontSize) then
+    local modeLabel = SETTINGS.parallelProcessing and (T("parallel") or "Parallel") or (T("sequential") or "Sequential")
+    -- Use theme accent (same blue as Device Auto selection).
+    if drawRadio(col3X, modelY, true, modeLabel, nil, modelBoxW, nil, nil, commonBtnFontSize) then
         SETTINGS.parallelProcessing = not SETTINGS.parallelProcessing
+        saveSettings()
     end
-    local parallelTip = SETTINGS.parallelProcessing
-        and T("tooltip_parallel")
-        or T("tooltip_sequential")
-    setTooltip(col3X, modelY, modelBoxW, btnH, parallelTip)
+    local modeTip = SETTINGS.parallelProcessing and T("tooltip_parallel") or T("tooltip_sequential")
+    setTooltip(col3X, modelY, modelBoxW, btnH, modeTip)
 
     -- === COLUMN 4: Device ===
     gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-    gfx.x = col4X
-    gfx.y = contentTop
-    gfx.drawstr(T("device") or "Device")
+    drawColumnHeader(T("device") or "Device", col4X, deviceColW, mainHeaderFont, contentTop)
+    gfx.setfont(1, "Arial", S(13))
 
     local deviceBoxW = deviceColW
     local deviceY = contentTop + S(20)
 
+    local deviceList = RUNTIME_DEVICES or DEVICES
     local deviceLabels = {}
-    for i = 1, #DEVICES do
-        deviceLabels[#deviceLabels + 1] = DEVICES[i].name
+    for i = 1, #deviceList do
+        deviceLabels[#deviceLabels + 1] = deviceList[i].uiName or deviceList[i].name
     end
     local deviceRadioFontSize = getUniformFontSizeCached("main_device_col", deviceLabels, deviceBoxW)
     
@@ -8316,22 +9562,57 @@ local function dialogLoop()
         directml = "device_directml_desc",
     }
     
-    for _, device in ipairs(DEVICES) do
+    for _, device in ipairs(deviceList) do
+        local label = device.uiName or device.name
         -- Use theme accent color for the selected device (same as Model selection)
-        if drawRadio(col4X, deviceY, SETTINGS.device == device.id, device.name, nil, deviceBoxW, nil, nil, deviceRadioFontSize) then
+        if drawRadio(col4X, deviceY, SETTINGS.device == device.id, label, nil, deviceBoxW, nil, nil, commonBtnFontSize) then
             SETTINGS.device = device.id
             saveSettings()
         end
         local descKey = deviceDescKeys[device.id] or "device_auto_desc"
-        setTooltip(col4X, deviceY, deviceBoxW, btnH, T(descKey) or device.desc)
+        -- Prefer runtime-probed descriptions when present; they explain the actual backend availability.
+        local tip = nil
+        if device.descKey and device.descKey ~= "" then
+            tip = T(device.descKey)
+        else
+            tip = T(descKey) or device.desc
+        end
+        -- Include exact device id + full name in tooltip for clarity (especially when UI label is shortened).
+        if device.id and device.fullName and device.fullName ~= "" then
+            local labelIsShortened = (device.uiName and device.uiName ~= "" and device.uiName ~= device.fullName)
+            local isGpuLike = (tostring(device.id):match("^cuda:%d+$") or tostring(device.id):match("^directml:%d+$") or device.type == "cuda" or device.type == "directml")
+            if labelIsShortened or isGpuLike then
+                tip = tostring(tip or "") .. "\n\n" .. tostring(device.id) .. " — " .. tostring(device.fullName)
+            end
+        end
+        -- Append runtime note (translated) when applicable.
+        if (device.id == "auto" or device.id == "cpu") and RUNTIME_DEVICE_NOTE_KEY and RUNTIME_DEVICE_NOTE_KEY ~= "" then
+            tip = tostring(tip or "") .. "\n\n" .. T(RUNTIME_DEVICE_NOTE_KEY)
+        end
+        -- Append runtime skip note (e.g., ROCm GPU arch unsupported by installed rocBLAS).
+        if (device.id == "auto" or device.id == "cpu") and RUNTIME_DEVICE_SKIP_NOTE and RUNTIME_DEVICE_SKIP_NOTE ~= "" then
+            tip = tostring(tip or "") .. "\n\n" .. tostring(RUNTIME_DEVICE_SKIP_NOTE)
+        end
+        setTooltip(col4X, deviceY, deviceBoxW, btnH, tip)
         deviceY = deviceY + S(22)
+    end
+
+    -- Device header tooltip: include translated runtime note + any runtime skip notes.
+    local headerTip = nil
+    if RUNTIME_DEVICE_NOTE_KEY and RUNTIME_DEVICE_NOTE_KEY ~= "" then
+        headerTip = T(RUNTIME_DEVICE_NOTE_KEY)
+    end
+    if RUNTIME_DEVICE_SKIP_NOTE and RUNTIME_DEVICE_SKIP_NOTE ~= "" then
+        headerTip = (headerTip and (tostring(headerTip) .. "\n\n") or "") .. tostring(RUNTIME_DEVICE_SKIP_NOTE)
+    end
+    if headerTip and headerTip ~= "" then
+        setTooltip(col4X, contentTop - S(2), deviceBoxW, S(18), headerTip)
     end
 
     -- === COLUMN 5: Output ===
     gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-    gfx.x = col5X
-    gfx.y = contentTop
-    gfx.drawstr(T("output"))
+    drawColumnHeader(T("output"), col5X, outputColW, mainHeaderFont, contentTop)
+    gfx.setfont(1, "Arial", S(13))
 
     -- Fixed width for all Output column boxes
     local outBoxW = outputColW
@@ -8369,13 +9650,13 @@ local function dialogLoop()
     }, outBoxW, reservedLeftForIcon)
 
     local outY = contentTop + S(20)
-    if drawRadio(col5X, outY, SETTINGS.createNewTracks, newTracksLabel, nil, outBoxW, nil, nil, outputBoxFontSize) then
+    if drawRadio(col5X, outY, SETTINGS.createNewTracks, newTracksLabel, nil, outBoxW, nil, nil, commonBtnFontSize) then
         SETTINGS.createNewTracks = true
         SETTINGS.postProcessTakes = "none"
     end
     setTooltip(col5X, outY, outBoxW, btnH, T("tooltip_new_tracks"))
     outY = outY + S(22)
-    if drawRadio(col5X, outY, not SETTINGS.createNewTracks, inPlaceLabel, nil, outBoxW, nil, nil, outputBoxFontSize) then
+    if drawRadio(col5X, outY, not SETTINGS.createNewTracks, inPlaceLabel, nil, outBoxW, nil, nil, commonBtnFontSize) then
         SETTINGS.createNewTracks = false
     end
     setTooltip(col5X, outY, outBoxW, btnH, T("tooltip_in_place"))
@@ -8388,18 +9669,17 @@ local function dialogLoop()
 
         outY = outY + S(28)
         gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-        gfx.x = col5X
-        gfx.y = outY
-        gfx.drawstr(T("after"))
+        drawColumnHeader(T("after"), col5X, outBoxW, mainHeaderFont, outY)
+        gfx.setfont(1, "Arial", S(13))
 
         outY = outY + S(20)
-        if drawCheckbox(col5X, outY, SETTINGS.createFolder, T("create_folder"), posR, posG, posB, outBoxW, outputBoxFontSize) then
+        if drawCheckbox(col5X, outY, SETTINGS.createFolder, T("create_folder"), posR, posG, posB, outBoxW, commonBtnFontSize) then
             SETTINGS.createFolder = not SETTINGS.createFolder
         end
         setTooltip(col5X, outY, outBoxW, btnH, T("tooltip_create_folder"))
 
         outY = outY + S(22)
-        if drawCheckbox(col5X, outY, SETTINGS.muteOriginal, T("mute_original"), posR, posG, posB, outBoxW, outputBoxFontSize) then
+        if drawCheckbox(col5X, outY, SETTINGS.muteOriginal, T("mute_original"), posR, posG, posB, outBoxW, commonBtnFontSize) then
             SETTINGS.muteOriginal = not SETTINGS.muteOriginal
             if SETTINGS.muteOriginal then
                 SETTINGS.deleteOriginal = false; SETTINGS.deleteOriginalTrack = false
@@ -8410,7 +9690,7 @@ local function dialogLoop()
 
         outY = outY + S(22)
         local delItemColor = SETTINGS.deleteOriginal and {255, 120, 120} or {160, 160, 160}
-        if drawCheckbox(col5X, outY, SETTINGS.deleteOriginal, T("delete_original"), delItemColor[1], delItemColor[2], delItemColor[3], outBoxW, outputBoxFontSize) then
+        if drawCheckbox(col5X, outY, SETTINGS.deleteOriginal, T("delete_original"), delItemColor[1], delItemColor[2], delItemColor[3], outBoxW, commonBtnFontSize) then
             SETTINGS.deleteOriginal = not SETTINGS.deleteOriginal
             if SETTINGS.deleteOriginal then
                 SETTINGS.muteOriginal = false
@@ -8421,7 +9701,7 @@ local function dialogLoop()
 
         outY = outY + S(22)
         local delTrackColor = SETTINGS.deleteOriginalTrack and {255, 120, 120} or {160, 160, 160}
-        if drawCheckbox(col5X, outY, SETTINGS.deleteOriginalTrack, T("delete_track"), delTrackColor[1], delTrackColor[2], delTrackColor[3], outBoxW, outputBoxFontSize) then
+        if drawCheckbox(col5X, outY, SETTINGS.deleteOriginalTrack, T("delete_track"), delTrackColor[1], delTrackColor[2], delTrackColor[3], outBoxW, commonBtnFontSize) then
             SETTINGS.deleteOriginalTrack = not SETTINGS.deleteOriginalTrack
             if SETTINGS.deleteOriginalTrack then
                 SETTINGS.deleteOriginal = true; SETTINGS.muteOriginal = false
@@ -8434,7 +9714,7 @@ local function dialogLoop()
         local hasTimeSel = hasTimeSelection()
         if hasTimeSel then
             outY = outY + S(22)
-            if drawCheckbox(col5X, outY, SETTINGS.muteSelection, T("mute_selection"), posR, posG, posB, outBoxW, outputBoxFontSize) then
+            if drawCheckbox(col5X, outY, SETTINGS.muteSelection, T("mute_selection"), posR, posG, posB, outBoxW, commonBtnFontSize) then
                 SETTINGS.muteSelection = not SETTINGS.muteSelection
                 if SETTINGS.muteSelection then
                     SETTINGS.muteOriginal = false; SETTINGS.deleteOriginal = false; SETTINGS.deleteOriginalTrack = false
@@ -8445,7 +9725,7 @@ local function dialogLoop()
 
             outY = outY + S(22)
             local delSelColor = SETTINGS.deleteSelection and {255, 120, 120} or {160, 160, 160}
-            if drawCheckbox(col5X, outY, SETTINGS.deleteSelection, T("delete_selection"), delSelColor[1], delSelColor[2], delSelColor[3], outBoxW, outputBoxFontSize) then
+            if drawCheckbox(col5X, outY, SETTINGS.deleteSelection, T("delete_selection"), delSelColor[1], delSelColor[2], delSelColor[3], outBoxW, commonBtnFontSize) then
                 SETTINGS.deleteSelection = not SETTINGS.deleteSelection
                 if SETTINGS.deleteSelection then
                     SETTINGS.muteOriginal = false; SETTINGS.deleteOriginal = false; SETTINGS.deleteOriginalTrack = false
@@ -8465,39 +9745,38 @@ local function dialogLoop()
             gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
             gfx.x = col5X
             gfx.y = outY
-            gfx.drawstr("Direct")
+            gfx.drawstr(T("direct") or "Direct")
 
             outY = outY + S(16)
             gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 1)
             gfx.x = col5X
             gfx.y = outY
-            gfx.drawstr("Explode selected takes now")
+            gfx.drawstr(T("direct_explode_now") or "Explode selected takes now")
 
             outY = outY + S(20)
-            if drawRadio(col5X, outY, false, stripExplodePrefix(T("explode_to_new_tracks")), nil, outBoxW, pulseMult, "explode", outputBoxFontSize) then
+            if drawRadio(col5X, outY, false, stripExplodePrefix(T("explode_to_new_tracks")), nil, outBoxW, pulseMult, "explode", commonBtnFontSize) then
                 applyPostProcessToSelectedCandidates("explode_new_tracks")
             end
-            setTooltip(col5X, outY, outBoxW, btnH, "Explode selected multi-take item(s) into new tracks.")
+            setTooltip(col5X, outY, outBoxW, btnH, T("tooltip_direct_explode_new_tracks"))
 
             outY = outY + S(22)
-            if drawRadio(col5X, outY, false, stripExplodePrefix(T("explode_in_place")), nil, outBoxW, pulseMult, "explode", outputBoxFontSize) then
+            if drawRadio(col5X, outY, false, stripExplodePrefix(T("explode_in_place")), nil, outBoxW, pulseMult, "explode", commonBtnFontSize) then
                 applyPostProcessToSelectedCandidates("explode_in_place")
             end
-            setTooltip(col5X, outY, outBoxW, btnH, "Explode selected multi-take item(s) as separate items on the same track.")
+            setTooltip(col5X, outY, outBoxW, btnH, T("tooltip_direct_explode_in_place"))
 
             outY = outY + S(22)
-            if drawRadio(col5X, outY, false, stripExplodePrefix(T("explode_in_order")), nil, outBoxW, pulseMult, "explode", outputBoxFontSize) then
+            if drawRadio(col5X, outY, false, stripExplodePrefix(T("explode_in_order")), nil, outBoxW, pulseMult, "explode", commonBtnFontSize) then
                 applyPostProcessToSelectedCandidates("explode_in_order")
             end
-            setTooltip(col5X, outY, outBoxW, btnH, "Explode selected multi-take item(s) sequentially in time.")
+            setTooltip(col5X, outY, outBoxW, btnH, T("tooltip_direct_explode_in_order"))
         end
     else
         -- In-place post-processing options
         outY = outY + S(28)
         gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-        gfx.x = col5X
-        gfx.y = outY
-        gfx.drawstr(T("after"))
+        drawColumnHeader(T("after"), col5X, outBoxW, mainHeaderFont, outY)
+        gfx.setfont(1, "Arial", S(13))
 
         -- Direct-tool detection: if selected multi-take items exist (and overlap time selection if present),
         -- pulse-highlight Explode options.
@@ -8511,14 +9790,14 @@ local function dialogLoop()
         outY = outY + S(20)
         local mode = tostring(SETTINGS.postProcessTakes or "none")
 
-        if drawRadio(col5X, outY, mode == "none", T("keep_takes"), nil, outBoxW, nil, nil, outputBoxFontSize) then
+        if drawRadio(col5X, outY, mode == "none", T("keep_takes"), nil, outBoxW, nil, nil, commonBtnFontSize) then
             SETTINGS.postProcessTakes = "none"
             mode = "none"
         end
         setTooltip(col5X, outY, outBoxW, btnH, T("tooltip_keep_takes"))
 
         outY = outY + S(22)
-        if drawRadio(col5X, outY, mode == "explode_new_tracks", stripExplodePrefix(T("explode_to_new_tracks")), nil, outBoxW, pulseMult, "explode", outputBoxFontSize) then
+        if drawRadio(col5X, outY, mode == "explode_new_tracks", stripExplodePrefix(T("explode_to_new_tracks")), nil, outBoxW, pulseMult, "explode", commonBtnFontSize) then
             SETTINGS.postProcessTakes = "explode_new_tracks"
             mode = "explode_new_tracks"
             applyPostProcessToSelectedCandidates(mode)
@@ -8526,7 +9805,7 @@ local function dialogLoop()
         setTooltip(col5X, outY, outBoxW, btnH, T("tooltip_explode_to_new_tracks"))
 
         outY = outY + S(22)
-        if drawRadio(col5X, outY, mode == "explode_in_place", stripExplodePrefix(T("explode_in_place")), nil, outBoxW, pulseMult, "explode", outputBoxFontSize) then
+        if drawRadio(col5X, outY, mode == "explode_in_place", stripExplodePrefix(T("explode_in_place")), nil, outBoxW, pulseMult, "explode", commonBtnFontSize) then
             SETTINGS.postProcessTakes = "explode_in_place"
             mode = "explode_in_place"
             applyPostProcessToSelectedCandidates(mode)
@@ -8534,7 +9813,7 @@ local function dialogLoop()
         setTooltip(col5X, outY, outBoxW, btnH, T("tooltip_explode_in_place"))
 
         outY = outY + S(22)
-        if drawRadio(col5X, outY, mode == "explode_in_order", stripExplodePrefix(T("explode_in_order")), nil, outBoxW, pulseMult, "explode", outputBoxFontSize) then
+        if drawRadio(col5X, outY, mode == "explode_in_order", stripExplodePrefix(T("explode_in_order")), nil, outBoxW, pulseMult, "explode", commonBtnFontSize) then
             SETTINGS.postProcessTakes = "explode_in_order"
             mode = "explode_in_order"
             applyPostProcessToSelectedCandidates(mode)
@@ -8891,6 +10170,10 @@ local function dialogLoop()
         end
     end
 
+    -- Track mouse state for next frame (must be at END so edge-detection for UI RMB works).
+    mainDialogArt.wasMouseDown = mouseDown
+    mainDialogArt.wasRightMouseDown = rightMouseDown
+
     -- Draw tooltip on top of everything
     drawTooltip()
 
@@ -8954,9 +10237,13 @@ end
 -- Show stem selection dialog
 showStemSelectionDialog = function()
     loadSettings()
+    perfMark("showStemSelectionDialog(): loadSettings done")
     GUI.result = nil
     GUI.wasMouseDown = false
     GUI.hadSelectionOnOpen = true  -- Dialog was opened with valid selection, don't auto-close
+    -- Device list probe can be slow (imports torch). Run it async so the window appears immediately.
+    startRuntimeDeviceProbeAsync(true)
+    perfMark("showStemSelectionDialog(): async device probe started")
 
     -- Use saved size if available, otherwise use default
     local dialogW = GUI.savedW or GUI.baseW
@@ -8987,6 +10274,7 @@ showStemSelectionDialog = function()
     lastDialogH = dialogH
 
     gfx.init(SCRIPT_NAME, dialogW, dialogH, 0, posX, posY)
+    perfMark("showStemSelectionDialog(): gfx.init done (window visible)")
 
     -- Make window resizable (requires js_ReaScriptAPI extension)
     makeWindowResizable()
@@ -9032,11 +10320,158 @@ local function suppressStderr()
     return OS == "Windows" and " 2>nul" or " 2>/dev/null"
 end
 
+-- File size helper (bytes). Returns -1 on failure.
+local function fileSizeBytes(p)
+    if not p then return -1 end
+    local f = io.open(p, "rb")
+    if not f then return -1 end
+    local sz = f:seek("end")
+    f:close()
+    return tonumber(sz) or -1
+end
+
+-- Run ffmpeg extraction and capture stdout+stderr to a log file for debugging.
+-- Returns: ok(bool), ffmpegLogPath(string), exitCode(number|nil)
+local function runFfmpegExtract(sourceFile, offsetSec, durationSec, outputPath)
+    local logPath = tostring(outputPath) .. ".ffmpeg.log"
+    -- Keep output quiet in REAPER; log errors for us.
+    local cmd = string.format(
+        'ffmpeg -y -hide_banner -nostats -loglevel error -i "%s" -ss %.6f -t %.6f -ar 44100 -ac 2 "%s"',
+        sourceFile, offsetSec, durationSec, outputPath
+    )
+
+    local exitCode = nil
+    if OS ~= "Windows" then
+        -- On Unix, os.execute uses /bin/sh so redirection works.
+        local ok, _, code = os.execute(cmd .. ' >"' .. logPath .. '" 2>&1')
+        if ok == true then exitCode = 0
+        elseif type(code) == "number" then exitCode = code
+        else exitCode = 1 end
+    else
+        -- Best-effort on Windows: run via cmd.exe so redirection works (still hidden via execHidden).
+        -- Note: cmd quoting is a bit different; this is diagnostic, not performance-critical.
+        local winCmd = 'cmd /c ' .. quoteArg(cmd .. ' >' .. quoteArg(logPath) .. ' 2>&1')
+        execHidden(winCmd)
+        -- We don't get a reliable exit code from execHidden here.
+    end
+
+    local sz = fileSizeBytes(outputPath)
+    local ok = (sz and sz > 1024)
+    return ok, logPath, exitCode
+end
+
+-- Fallback extractor: render audio from REAPER itself (no ffmpeg dependency).
+-- Returns: ok(bool), err(string|nil)
+local function renderTakeAccessorToWav(take, startTime, endTime, outputPath)
+    if not (reaper and reaper.CreateTakeAudioAccessor and reaper.GetAudioAccessorSamples and reaper.DestroyAudioAccessor) then
+        return false, "REAPER AudioAccessor API not available"
+    end
+    if not take or not reaper.ValidatePtr(take, "MediaItem_Take*") then
+        return false, "Invalid take"
+    end
+    if not startTime or not endTime or startTime >= endTime then
+        return false, "Invalid render range"
+    end
+
+    local sr = 44100
+    local ch = 2
+    local duration = endTime - startTime
+    local totalFrames = math.floor(duration * sr + 0.5)
+    if totalFrames <= 0 then
+        return false, "Render range is empty"
+    end
+
+    local acc = reaper.CreateTakeAudioAccessor(take)
+    if not acc then
+        return false, "Failed to create take audio accessor"
+    end
+
+    -- Try to set bounds when available (not required, but can improve correctness).
+    if reaper.GetSet_AudioAccessorStartTime then
+        pcall(function() reaper.GetSet_AudioAccessorStartTime(acc, true, startTime) end)
+    end
+    if reaper.GetSet_AudioAccessorEndTime then
+        pcall(function() reaper.GetSet_AudioAccessorEndTime(acc, true, endTime) end)
+    end
+
+    local f = io.open(outputPath, "wb")
+    if not f then
+        reaper.DestroyAudioAccessor(acc)
+        return false, "Failed to open output file for writing"
+    end
+
+    -- Write WAV header (32-bit float)
+    local bytesPerSample = 4
+    local blockAlign = ch * bytesPerSample
+    local byteRate = sr * blockAlign
+    local dataSizePos = nil
+    local riffSizePos = nil
+
+    f:write("RIFF")
+    riffSizePos = f:seek()  -- position after 'RIFF'
+    f:write(string.pack("<I4", 0)) -- placeholder riff size
+    f:write("WAVE")
+    f:write("fmt ")
+    f:write(string.pack("<I4", 16)) -- fmt chunk size
+    f:write(string.pack("<I2", 3))  -- audio format 3 = IEEE float
+    f:write(string.pack("<I2", ch))
+    f:write(string.pack("<I4", sr))
+    f:write(string.pack("<I4", byteRate))
+    f:write(string.pack("<I2", blockAlign))
+    f:write(string.pack("<I2", 32)) -- bits per sample
+    f:write("data")
+    dataSizePos = f:seek()
+    f:write(string.pack("<I4", 0)) -- placeholder data size
+
+    local blockFrames = 8192
+    local buf = reaper.new_array(blockFrames * ch)
+    local framesWritten = 0
+    local curTime = startTime
+
+    while framesWritten < totalFrames do
+        local need = math.min(blockFrames, totalFrames - framesWritten)
+        -- Ensure buffer capacity.
+        if need ~= blockFrames then
+            buf = reaper.new_array(need * ch)
+        end
+        local ok = reaper.GetAudioAccessorSamples(acc, sr, ch, curTime, need, buf)
+        if not ok or ok == 0 then
+            break
+        end
+        -- Write interleaved float32 samples
+        local parts = {}
+        for i = 1, need * ch do
+            parts[i] = string.pack("<f", buf[i] or 0.0)
+        end
+        f:write(table.concat(parts))
+        framesWritten = framesWritten + need
+        curTime = curTime + (need / sr)
+    end
+
+    reaper.DestroyAudioAccessor(acc)
+
+    -- Finalize header sizes
+    local dataBytes = framesWritten * ch * bytesPerSample
+    local fileEnd = f:seek("end")
+    -- data chunk size
+    f:seek("set", dataSizePos)
+    f:write(string.pack("<I4", dataBytes))
+    -- riff chunk size = fileSize - 8
+    f:seek("set", riffSizePos)
+    f:write(string.pack("<I4", fileEnd - 8))
+    f:close()
+
+    if dataBytes <= 0 then
+        return false, "AudioAccessor rendered 0 samples"
+    end
+    return true, nil
+end
+
 -- Execute command without showing a window (Windows-specific)
 -- On Windows, os.execute() shows a brief CMD flash. This avoids that.
 local function execHidden(cmd)
     debugLog("execHidden called")
-    debugLog("  Command: " .. cmd:sub(1, 200) .. (cmd:len() > 200 and "..." or ""))
+    debugLog("  Command: " .. cmd:sub(1, 200) .. (cmd:len() > 200 and ".." or ""))
     if OS == "Windows" then
         -- Prefer direct ExecProcess (no console windows). Note: shell redirection (2>nul)
         -- only works via cmd.exe, so strip it when running without cmd.
@@ -9110,6 +10545,10 @@ local function renderItemToWav(item, outputPath)
     local itemEnd = itemPos + itemLen
     local takeOffset = reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS")
     local playrate = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
+    if not playrate or playrate < 0.0001 then
+        debugLog("renderItemToWav: suspicious take playrate=" .. tostring(playrate) .. " -> using 1.0")
+        playrate = 1.0
+    end
 
     -- Check for time selection that overlaps the item
     local timeSelStart, timeSelEnd = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
@@ -9137,17 +10576,20 @@ local function renderItemToWav(item, outputPath)
     -- Calculate source file offset and duration
     local renderOffset = takeOffset + (renderStart - itemPos) * playrate
     local renderDuration = (renderEnd - renderStart) * playrate
+    if not renderDuration or renderDuration <= 0.0 then
+        return nil, "Selection is empty (0s). Make a longer time selection or pick an item with length.", nil
+    end
 
-    local ffmpegCmd = string.format(
-        'ffmpeg -y -i "%s" -ss %.6f -t %.6f -ar 44100 -ac 2 "%s"' .. suppressStderr(),
-        sourceFile, renderOffset, renderDuration, outputPath
-    )
-
-    execHidden(ffmpegCmd)
-
-    local f = io.open(outputPath, "r")
-    if f then f:close(); return outputPath, nil, renderStart, renderEnd - renderStart
-    else return nil, "Failed to extract audio" end
+    -- Prefer ffmpeg (fast). If it fails, fall back to REAPER AudioAccessor (robust).
+    local ok, ffmpegLog = runFfmpegExtract(sourceFile, renderOffset, renderDuration, outputPath)
+    if ok then
+        return outputPath, nil, renderStart, renderEnd - renderStart
+    end
+    local accOk, accErr = renderTakeAccessorToWav(take, renderStart, renderEnd, outputPath)
+    if accOk then
+        return outputPath, nil, renderStart, renderEnd - renderStart
+    end
+    return nil, "Failed to extract audio (ffmpeg produced empty output). See: " .. tostring(ffmpegLog) .. (accErr and ("\nAudioAccessor: " .. tostring(accErr)) or ""), nil
 end
 
 -- Render time selection to a temporary WAV file
@@ -9257,22 +10699,30 @@ local function renderTimeSelectionToWav(outputPath)
         local itemPos = reaper.GetMediaItemInfo_Value(selectedItems[1].item, "D_POSITION")
         local takeOffset = reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS")
         local playrate = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
+        if not playrate or playrate < 0.0001 then
+            debugLog("renderTimeSelectionToWav: suspicious take playrate=" .. tostring(playrate) .. " -> using 1.0")
+            playrate = 1.0
+        end
 
         local selStartInItem = math.max(0, startTime - itemPos)
         local selEndInItem = math.min(endTime - itemPos, reaper.GetMediaItemInfo_Value(selectedItems[1].item, "D_LENGTH"))
         local duration = (selEndInItem - selStartInItem) * playrate
         local sourceOffset = takeOffset + (selStartInItem * playrate)
+        if not duration or duration <= 0.0 then
+            return nil, "Time selection is empty (0s). Make a longer time selection.", nil
+        end
 
-        local ffmpegCmd = string.format(
-            'ffmpeg -y -i "%s" -ss %.6f -t %.6f -ar 44100 -ac 2 "%s"' .. suppressStderr(),
-            sourceFile, sourceOffset, duration, outputPath
-        )
-
-        execHidden(ffmpegCmd)
-
-        local f = io.open(outputPath, "r")
-        if f then f:close(); return outputPath, nil, foundItem
-        else return nil, "Failed to extract audio from time selection", nil end
+        local renderStart = itemPos + selStartInItem
+        local renderEnd = itemPos + selEndInItem
+        local ok, ffmpegLog = runFfmpegExtract(sourceFile, sourceOffset, duration, outputPath)
+        if ok then
+            return outputPath, nil, foundItem
+        end
+        local accOk, accErr = renderTakeAccessorToWav(take, renderStart, renderEnd, outputPath)
+        if accOk then
+            return outputPath, nil, foundItem
+        end
+        return nil, "Failed to extract audio (ffmpeg produced empty output). See: " .. tostring(ffmpegLog) .. (accErr and ("\nAudioAccessor: " .. tostring(accErr)) or ""), nil
     end
 
     -- Multiple items selected - group by track
@@ -9310,22 +10760,30 @@ local function renderTimeSelectionToWav(outputPath)
     local itemPos = reaper.GetMediaItemInfo_Value(foundItem, "D_POSITION")
     local takeOffset = reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS")
     local playrate = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
+    if not playrate or playrate < 0.0001 then
+        debugLog("renderTimeSelectionToWav: suspicious take playrate=" .. tostring(playrate) .. " -> using 1.0")
+        playrate = 1.0
+    end
 
     local selStartInItem = math.max(0, startTime - itemPos)
     local selEndInItem = math.min(endTime - itemPos, reaper.GetMediaItemInfo_Value(foundItem, "D_LENGTH"))
     local duration = (selEndInItem - selStartInItem) * playrate
     local sourceOffset = takeOffset + (selStartInItem * playrate)
+    if not duration or duration <= 0.0 then
+        return nil, "Time selection is empty (0s). Make a longer time selection.", nil
+    end
 
-    local ffmpegCmd = string.format(
-        'ffmpeg -y -i "%s" -ss %.6f -t %.6f -ar 44100 -ac 2 "%s"' .. suppressStderr(),
-        sourceFile, sourceOffset, duration, outputPath
-    )
-
-    execHidden(ffmpegCmd)
-
-    local f = io.open(outputPath, "r")
-    if f then f:close(); return outputPath, nil, foundItem
-    else return nil, "Failed to extract audio from time selection", nil end
+    local renderStart = itemPos + selStartInItem
+    local renderEnd = itemPos + selEndInItem
+    local ok, ffmpegLog = runFfmpegExtract(sourceFile, sourceOffset, duration, outputPath)
+    if ok then
+        return outputPath, nil, foundItem
+    end
+    local accOk, accErr = renderTakeAccessorToWav(take, renderStart, renderEnd, outputPath)
+    if accOk then
+        return outputPath, nil, foundItem
+    end
+    return nil, "Failed to extract audio (ffmpeg produced empty output). See: " .. tostring(ffmpegLog) .. (accErr and ("\nAudioAccessor: " .. tostring(accErr)) or ""), nil
 end
 
 -- Extract audio for a specific track within time selection
@@ -9382,36 +10840,13 @@ local function renderTrackTimeSelectionToWav(track, outputPath)
     local sourceFile = reaper.GetMediaSourceFileName(source, "")
     if not sourceFile or sourceFile == "" then return nil, "No source file" end
 
-    local itemPos = reaper.GetMediaItemInfo_Value(foundItem, "D_POSITION")
-    local itemLen = reaper.GetMediaItemInfo_Value(foundItem, "D_LENGTH")
-    local takeOffset = reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS")
-    local playrate = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
-
-    local selStartInItem = math.max(0, startTime - itemPos)
-    local selEndInItem = math.min(endTime - itemPos, itemLen)
-    local duration = (selEndInItem - selStartInItem) * playrate
-    local sourceOffset = takeOffset + (selStartInItem * playrate)
-
-    -- Debug logging for audio extraction
-    debugLog("=== renderTrackTimeSelectionToWav DEBUG ===")
-    debugLog("Time selection: " .. startTime .. " to " .. endTime)
-    debugLog("Item position: " .. itemPos .. ", length: " .. itemLen)
-    debugLog("takeOffset: " .. takeOffset .. ", playrate: " .. playrate)
-    debugLog("selStartInItem: " .. selStartInItem .. ", selEndInItem: " .. selEndInItem)
-    debugLog("sourceOffset: " .. sourceOffset .. ", duration: " .. duration)
-    debugLog("Source file: " .. sourceFile)
-
-    local ffmpegCmd = string.format(
-        'ffmpeg -y -i "%s" -ss %.6f -t %.6f -ar 44100 -ac 2 "%s"' .. suppressStderr(),
-        sourceFile, sourceOffset, duration, outputPath
-    )
-    debugLog("ffmpeg cmd: ffmpeg -ss " .. sourceOffset .. " -t " .. duration)
-
-    execHidden(ffmpegCmd)
-
-    local f = io.open(outputPath, "r")
-    if f then f:close(); return outputPath, nil, foundItem, allFoundItems
-    else return nil, "Failed to extract audio", nil, nil end
+    -- Reuse the robust single-item extractor (ffmpeg with captured log + AudioAccessor fallback).
+    -- NOTE: This assumes the track's audio comes from a single main item/take (common workflow).
+    local extracted, err = renderItemToWav(foundItem, outputPath)
+    if extracted then
+        return outputPath, nil, foundItem, allFoundItems
+    end
+    return nil, err or "Failed to extract audio", nil, nil
 end
 
 -- Render selected items on a track to WAV (no time selection needed)
@@ -9441,34 +10876,12 @@ local function renderTrackSelectedItemsToWav(track, outputPath)
 
     if not foundItem then return nil, "No selected items on track" end
 
-    local take = reaper.GetActiveTake(foundItem)
-    if not take then return nil, "No active take" end
-
-    local source = reaper.GetMediaItemTake_Source(take)
-    if not source then return nil, "No source" end
-
-    local sourceFile = reaper.GetMediaSourceFileName(source, "")
-    if not sourceFile or sourceFile == "" then return nil, "No source file" end
-
-    local itemPos = reaper.GetMediaItemInfo_Value(foundItem, "D_POSITION")
-    local itemLen = reaper.GetMediaItemInfo_Value(foundItem, "D_LENGTH")
-    local takeOffset = reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS")
-    local playrate = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
-
-    -- Extract the full item (not a sub-selection)
-    local duration = itemLen * playrate
-    local sourceOffset = takeOffset
-
-    local ffmpegCmd = string.format(
-        'ffmpeg -y -i "%s" -ss %.6f -t %.6f -ar 44100 -ac 2 "%s"' .. suppressStderr(),
-        sourceFile, sourceOffset, duration, outputPath
-    )
-
-    execHidden(ffmpegCmd)
-
-    local f = io.open(outputPath, "r")
-    if f then f:close(); return outputPath, nil, foundItem, allFoundItems
-    else return nil, "Failed to extract audio", nil, nil end
+    -- Robust single-item extraction (renders full item when no time selection exists).
+    local extracted, err = renderItemToWav(foundItem, outputPath)
+    if extracted then
+        return outputPath, nil, foundItem, allFoundItems
+    end
+    return nil, err or "Failed to extract audio", nil, nil
 end
 
 -- Render a single item to WAV (for in-place multi-item processing)
@@ -9486,24 +10899,32 @@ local function renderSingleItemToWav(item, outputPath)
     local sourceFile = reaper.GetMediaSourceFileName(source, "")
     if not sourceFile or sourceFile == "" then return nil, "No source file" end
 
-    local itemPos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
     local itemLen = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
     local takeOffset = reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS")
     local playrate = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
 
+    if not playrate or playrate < 0.0001 then
+        debugLog("renderSingleItemToWav: suspicious take playrate=" .. tostring(playrate) .. " -> using 1.0")
+        playrate = 1.0
+    end
+
     local duration = itemLen * playrate
     local sourceOffset = takeOffset
 
-    local ffmpegCmd = string.format(
-        'ffmpeg -y -i "%s" -ss %.6f -t %.6f -ar 44100 -ac 2 "%s"' .. suppressStderr(),
-        sourceFile, sourceOffset, duration, outputPath
-    )
+    if not duration or duration <= 0.0 then
+        return nil, "Item length is 0s"
+    end
 
-    execHidden(ffmpegCmd)
-
-    local f = io.open(outputPath, "r")
-    if f then f:close(); return outputPath, nil
-    else return nil, "Failed to extract audio" end
+    local ok, ffmpegLog = runFfmpegExtract(sourceFile, sourceOffset, duration, outputPath)
+    if ok then
+        return outputPath, nil
+    end
+    local itemPos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+    local accOk, accErr = renderTakeAccessorToWav(take, itemPos, itemPos + itemLen, outputPath)
+    if accOk then
+        return outputPath, nil
+    end
+    return nil, "Failed to extract audio (ffmpeg produced empty output). See: " .. tostring(ffmpegLog) .. (accErr and ("\nAudioAccessor: " .. tostring(accErr)) or "")
 end
 
 -- Progress window state
@@ -9513,7 +10934,7 @@ local progressState = {
     stdoutFile = nil,
     logFile = nil,
     percent = 0,
-    stage = "Starting...",
+    stage = "Starting..",
     startTime = 0,
     wasMouseDown = false,  -- Track mouse state for click detection
     -- Nerd terminal state
@@ -9531,6 +10952,9 @@ local multiTrackQueue = {
     active = false,        -- Is multi-track mode active
     currentTrackName = "", -- Name of current track being processed
     currentSourceTrack = nil, -- Track to place stems under
+    showTerminal = false,  -- Nerd mode: show terminal output (sequential mode only)
+    terminalLines = {},    -- Terminal output lines
+    lastTerminalUpdate = 0, -- Last time terminal was updated
 }
 
 -- Forward declarations for multi-track processing
@@ -9554,7 +10978,7 @@ local function makeProgressWindowResizable()
     if progressWindowResizableSet then return true end
     if not reaper.JS_Window_Find then return false end
 
-    local hwnd = reaper.JS_Window_Find("STEMwerk - Processing...", true)
+    local hwnd = reaper.JS_Window_Find("STEMwerk - Processing..", true)
     if not hwnd then return false end
 
     local style = reaper.JS_Window_GetLong(hwnd, "STYLE")
@@ -9631,13 +11055,45 @@ local function drawProgressWindow()
     -- Mouse position for UI interactions
     local mx, my = gfx.mouse_x, gfx.mouse_y
     local mouseDown = gfx.mouse_cap & 1 == 1
+    local rightMouseDown = gfx.mouse_cap & 2 == 2
 
     -- Tooltip tracking
     local tooltipText = nil
     local tooltipX, tooltipY = 0, 0
 
+    -- Best-effort: parse actual selected device id/name from the separation log (so UI never lies).
+    -- We update at most ~2x/sec to keep it cheap.
+    if progressState.logFile and (not progressState._deviceInfoLastAt or (os.clock() - progressState._deviceInfoLastAt) > 0.5) then
+        progressState._deviceInfoLastAt = os.clock()
+        local devId, devName = nil, nil
+        local f = io.open(progressState.logFile, "r")
+        if f then
+            local n = 0
+            for line in f:lines() do
+                n = n + 1
+                -- Example: Selected device: cuda:0 (AMD Radeon RX 9070)
+                local id, name = line:match("^Selected device:%s*([%w%-%_:%.]+)%s*%((.+)%)")
+                if id then
+                    devId = id
+                    devName = name
+                end
+                -- Example: STEMWERK: torch.cuda.set_device(1) -> current_device=1 (AMD Radeon 780M Graphics)
+                local idx, name2 = line:match("^STEMWERK:%s*torch%.cuda%.set_device%((%d+)%)%s*%-%>%s*current_device=%d+%s*%((.+)%)")
+                if idx then
+                    devId = "cuda:" .. idx
+                    devName = name2
+                end
+                if n >= 80 then break end
+            end
+            f:close()
+        end
+        progressState._deviceId = devId
+        progressState._deviceName = devName
+    end
+
     -- === THEME TOGGLE (top right) ===
-    local themeSize = PS(18)
+    local iconScale = 0.66
+    local themeSize = math.max(PS(11), math.floor(PS(18) * iconScale + 0.5))
     local themeX = w - themeSize - PS(8)
     local themeY = PS(6)
     local themeHover = mx >= themeX and mx <= themeX + themeSize and my >= themeY and my <= themeY + themeSize
@@ -9662,6 +11118,7 @@ local function drawProgressWindow()
 
     -- Theme click and tooltip
     if themeHover then
+        GUI.uiClickedThisFrame = true
         tooltipText = SETTINGS.darkMode and T("switch_light") or T("switch_dark")
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
         if mouseDown and not progressState.wasMouseDown then
@@ -9685,8 +11142,13 @@ local function drawProgressWindow()
 
     -- Language tooltip and click
     if langHover then
+        GUI.uiClickedThisFrame = true
         tooltipText = T("tooltip_change_language")
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
+    end
+    if langHover and rightMouseDown and not (progressState.wasRightMouseDown or false) then
+        SETTINGS.tooltips = not SETTINGS.tooltips
+        saveSettings()
     end
     if langHover and mouseDown and not progressState.wasMouseDown then
         local langs = {"en", "nl", "de"}
@@ -9700,7 +11162,7 @@ local function drawProgressWindow()
     end
 
     -- === FX TOGGLE (below theme icon) ===
-    local fxSize = PS(16)
+    local fxSize = math.max(PS(10), math.floor(PS(16) * iconScale + 0.5))
     local fxX = themeX + (themeSize - fxSize) / 2
     local fxY = themeY + themeSize + PS(3)
     local fxHover = mx >= fxX - PS(2) and mx <= fxX + fxSize + PS(2) and my >= fxY - PS(2) and my <= fxY + fxSize + PS(2)
@@ -9728,6 +11190,7 @@ local function drawProgressWindow()
     end
 
     if fxHover then
+        GUI.uiClickedThisFrame = true
         tooltipText = SETTINGS.visualFX and T("fx_disable") or T("fx_enable")
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
     end
@@ -9746,12 +11209,12 @@ local function drawProgressWindow()
         end
     end
 
-    -- Model badge (aligned with stems row at right side)
+    -- Model badge (align with progress bar at right side)
     local modelText = SETTINGS.model or "htdemucs"
     gfx.setfont(1, "Arial", PS(11))
     local modelW = gfx.measurestr(modelText) + PS(16)
-    local badgeX = w - modelW - PS(20)
-    local badgeY = PS(61)  -- Aligned with stems row
+    local badgeX = w - modelW - PS(25) -- align with progress bar right edge
+    local badgeY = PS(98) + math.floor((PS(28) - PS(18)) / 2) -- vertically center against progress bar
     local badgeH = PS(18)
     gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 1)
     gfx.rect(badgeX, badgeY, modelW, badgeH, 1)
@@ -9772,7 +11235,8 @@ local function drawProgressWindow()
         gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
         gfx.x = titleX
         gfx.y = titleY
-        gfx.drawstr("Track " .. multiTrackQueue.currentIndex .. "/" .. multiTrackQueue.totalTracks .. ": " .. (multiTrackQueue.currentTrackName or ""))
+        local trackPrefix = T("track_prefix") or "Track"
+        gfx.drawstr(tostring(trackPrefix) .. " " .. multiTrackQueue.currentIndex .. "/" .. multiTrackQueue.totalTracks .. ": " .. (multiTrackQueue.currentTrackName or ""))
     else
         gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
         gfx.x = titleX
@@ -9859,9 +11323,17 @@ local function drawProgressWindow()
     gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
     gfx.x = PS(25)
     gfx.y = PS(130)
-    local stageDisplay = progressState.stage or "Starting..."
+    local stageDisplay = progressState.stage or (T("starting") or "Starting...")
+    if stageDisplay == "Starting.." or stageDisplay == "Starting..." then
+        stageDisplay = T("starting") or stageDisplay
+    elseif stageDisplay == "Waiting.." or stageDisplay == "Waiting..." then
+        stageDisplay = T("waiting") or stageDisplay
+    end
+    -- Normalize common spacing quirks so ETA parsing/rendering is stable.
+    stageDisplay = stageDisplay:gsub("ETA%s+(%d+):%s*(%d+)", "ETA %1:%2")
+    stageDisplay = stageDisplay:gsub("%((%d+):%s*(%d+)", "(%1:%2")
     local maxStageLen = math.floor(70 * scale)
-    if #stageDisplay > maxStageLen then stageDisplay = stageDisplay:sub(1, maxStageLen - 3) .. "..." end
+    if #stageDisplay > maxStageLen then stageDisplay = stageDisplay:sub(1, maxStageLen - 3) .. ".." end
     gfx.drawstr(stageDisplay)
 
     -- Info boxes row
@@ -9881,20 +11353,23 @@ local function drawProgressWindow()
     gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
     gfx.x = PS(32)
     gfx.y = infoY + PS(4)
-    gfx.drawstr(string.format("Elapsed: %d:%02d", mins, secs))
+    local elapsedLabel = T("elapsed") or "Elapsed:"
+    gfx.drawstr(string.format("%s %d:%02d", tostring(elapsedLabel), mins, secs))
 
     -- ETA box (if available)
     local stageStr = progressState.stage or ""
-    local eta = stageStr:match("ETA ([%d:]+)")
+    local eta = stageStr:match("ETA%s+([%d]+:%s*%d+)")
+    if eta then eta = eta:gsub("%s+", "") end
     if eta then
         gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 1)
         gfx.rect(PS(128), infoY, PS(75), infoH, 1)
         gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
         gfx.rect(PS(128), infoY, PS(75), infoH, 0)
-        gfx.set(0.3, 0.75, 0.45, 1)
+        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
         gfx.x = PS(135)
         gfx.y = infoY + PS(4)
-        gfx.drawstr("ETA: " .. eta)
+        local etaLabel = T("eta_label") or "ETA:"
+        gfx.drawstr(tostring(etaLabel) .. " " .. eta)
     end
 
     -- Segment size indicator
@@ -9905,23 +11380,62 @@ local function drawProgressWindow()
     gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
     gfx.x = w - PS(183)
     gfx.y = infoY + PS(4)
-    gfx.drawstr("Seg: 30")
+    local segLabel = T("seg_label") or "Seg:"
+    gfx.drawstr(tostring(segLabel) .. " 30")
 
-    -- GPU indicator
+    -- Device indicator (CPU/GPU) - must reflect actual runtime device, not OS-specific hardcodes.
     gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 1)
     gfx.rect(w - PS(122), infoY, PS(97), infoH, 1)
     gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
     gfx.rect(w - PS(122), infoY, PS(97), infoH, 0)
-    gfx.set(0.3, 0.75, 0.45, 1)
+    local devId = tostring(progressState._deviceId or SETTINGS.device or "auto")
+    local devName = progressState._deviceName
+    local isCpu = (devId == "cpu")
+    local label = nil
+    if devId:match("^cuda:%d+$") then
+        local idx = devId:match("^cuda:(%d+)$") or "0"
+        label = "GPU" .. tostring(idx)
+    elseif devId:match("^directml:%d+$") then
+        local idx = devId:match("^directml:(%d+)$") or "0"
+        label = "DML" .. tostring(idx)
+    elseif devId == "directml" then
+        label = "DML"
+    elseif devId == "mps" then
+        label = "MPS"
+    elseif devId == "cpu" then
+        label = "CPU"
+    else
+        label = "AUTO"
+    end
+    local dr, dg, db = THEME.textDim[1], THEME.textDim[2], THEME.textDim[3]
+    if not isCpu and (devId:match("^cuda:") or devId:match("^directml") or devId == "mps") then
+        -- Green-ish only when actually using a GPU backend.
+        dr, dg, db = 0.3, 0.75, 0.45
+    end
+    gfx.set(dr, dg, db, 1)
     gfx.x = w - PS(115)
     gfx.y = infoY + PS(4)
-    gfx.drawstr("GPU: DirectML")
+    gfx.drawstr(label)
+    -- Tooltip on device box (full id + name)
+    local devBoxX, devBoxW = w - PS(122), PS(97)
+    local devHover = mx >= devBoxX and mx <= devBoxX + devBoxW and my >= infoY and my <= infoY + infoH
+    if devHover then
+        GUI.uiClickedThisFrame = true
+        local tipPrefix = T("device_tooltip_prefix") or "Device:"
+        local tip = tostring(tipPrefix) .. " " .. tostring(devId)
+        if devName and devName ~= "" then
+            tip = tip .. "\n" .. tostring(devName)
+        end
+        tooltipText = tip
+        tooltipX, tooltipY = mx + PS(10), my + PS(15)
+    end
 
     -- === NERD TERMINAL TOGGLE BUTTON ===
     local nerdBtnW = PS(22)
     local nerdBtnH = PS(18)
     local nerdBtnX = PS(25)
-    local nerdBtnY = infoY
+    -- Keep it below the time/ETA row so it doesn't overlap "Elapsed:"
+    local nerdBtnY = math.min(infoY + infoH + PS(6), h - PS(85))
     local nerdHover = mx >= nerdBtnX and mx <= nerdBtnX + nerdBtnW and my >= nerdBtnY and my <= nerdBtnY + nerdBtnH
 
     -- Draw nerd button (terminal icon: >_)
@@ -9939,10 +11453,11 @@ local function drawProgressWindow()
 
     -- Handle nerd button click and tooltip
     if nerdHover then
+        GUI.uiClickedThisFrame = true
         if progressState.showTerminal then
-            tooltipText = "Switch to Art View"
+            tooltipText = T("tooltip_nerd_mode_hide") or "Switch to Art View"
         else
-            tooltipText = "Nerd Mode: Show terminal output"
+            tooltipText = T("tooltip_nerd_mode_show") or "Nerd Mode: Show terminal output"
         end
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
         if mouseDown and not progressState.wasMouseDown then
@@ -9951,7 +11466,7 @@ local function drawProgressWindow()
     end
 
     -- === DISPLAY AREA (ART or TERMINAL) ===
-    local displayY = PS(190)
+    local displayY = nerdBtnY + nerdBtnH + PS(10)
     local displayH = h - displayY - PS(55)
     local displayX = PS(15)
     local displayW = w - PS(30)
@@ -9974,7 +11489,7 @@ local function drawProgressWindow()
             gfx.setfont(1, "Courier", PS(10), string.byte('b'))
             gfx.x = displayX + PS(5)
             gfx.y = displayY + PS(3)
-            gfx.drawstr("DEMUCS OUTPUT")
+            gfx.drawstr(T("terminal_output_title") or "DEMUCS OUTPUT")
 
             -- Read latest terminal output from stdout file
             local now = os.clock()
@@ -10005,7 +11520,7 @@ local function drawProgressWindow()
                 if lineY < displayY + displayH - PS(5) then
                     local line = progressState.terminalLines[i] or ""
                     -- Truncate long lines
-                    if #line > 80 then line = line:sub(1, 77) .. "..." end
+                    if #line > 80 then line = line:sub(1, 77) .. ".." end
 
                     -- Color based on content
                     if line:match("error") or line:match("Error") or line:match("ERROR") then
@@ -10038,7 +11553,7 @@ local function drawProgressWindow()
             -- Terminal hint
             gfx.set(0.3, 0.5, 0.3, 0.7)
             gfx.setfont(1, "Courier", PS(8))
-            local termHint = "Click >_ to return to art"
+            local termHint = T("terminal_hint_return_to_art") or "Click >_ to return to art"
             local termHintW = gfx.measurestr(termHint)
             gfx.x = displayX + (displayW - termHintW) / 2
             gfx.y = displayY + displayH - PS(12)
@@ -10090,6 +11605,7 @@ local function drawProgressWindow()
 
     -- Update mouse state AFTER all click handling
     progressState.wasMouseDown = mouseDown
+    progressState.wasRightMouseDown = rightMouseDown
 
     -- Cancel hint (below art/terminal)
     gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 1)
@@ -10124,41 +11640,9 @@ local function drawProgressWindow()
     if tooltipText then
         gfx.setfont(1, "Arial", PS(11))
         local padding = PS(8)
-        local tw = gfx.measurestr(tooltipText) + padding * 2
-        local th = PS(18) + padding * 2
-        local tx = tooltipX
-        local ty = tooltipY
-
-        -- Keep tooltip on screen
-        if tx + tw > w then
-            tx = w - tw - PS(5)
-        end
-        if ty + th > h then
-            ty = tooltipY - th - PS(20)
-        end
-
-        -- Background (theme-aware)
-        gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 0.98)
-        gfx.rect(tx, ty, tw, th, 1)
-
-        -- Colored top border (STEM colors gradient)
-        for i = 0, tw - 1 do
-            local colorIdx = math.floor(i / tw * 4) + 1
-            colorIdx = math.min(4, math.max(1, colorIdx))
-            local c = STEM_BORDER_COLORS[colorIdx]
-            gfx.set(c[1]/255, c[2]/255, c[3]/255, 0.9)
-            gfx.line(tx + i, ty, tx + i, ty + 2)
-        end
-
-        -- Border (theme-aware)
-        gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
-        gfx.rect(tx, ty, tw, th, 0)
-
-        -- Text (theme-aware)
-        gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
-        gfx.x = tx + padding
-        gfx.y = ty + padding + PS(2)
-        gfx.drawstr(tooltipText)
+        local lineH = PS(14)
+        local maxTextW = math.min(w * 0.62, PS(520))
+        drawTooltipStyled(tooltipText, tooltipX, tooltipY, w, h, padding, lineH, maxTextW)
     end
 
     gfx.update()
@@ -10220,6 +11704,30 @@ local function killWindowsProcessFromPidFile(pidFile)
     return true
 end
 
+-- Best-effort: kill a Unix process from a pid file
+local function killUnixProcessFromPidFile(pidFile)
+    if OS == "Windows" then return false end
+    if not pidFile or pidFile == "" then return false end
+    local f = io.open(pidFile, "r")
+    if not f then return false end
+    local pidStr = (f:read("*l") or ""):match("%d+")
+    f:close()
+    local pid = tonumber(pidStr)
+    if not pid or pid <= 0 then return false end
+
+    -- Try TERM first; if the process ignores it, the user can cancel again / wait for cleanup.
+    os.execute("kill -TERM " .. tostring(pid) .. " 2>/dev/null")
+    return true
+end
+
+-- Cross-platform kill wrapper
+local function killProcessFromPidFile(pidFile)
+    if OS == "Windows" then
+        return killWindowsProcessFromPidFile(pidFile)
+    end
+    return killUnixProcessFromPidFile(pidFile)
+end
+
 -- Start separation process in background (Windows)
 local function startSeparationProcess(inputFile, outputDir, model)
     local logFile = outputDir .. PATH_SEP .. "separation_log.txt"
@@ -10240,7 +11748,7 @@ local function startSeparationProcess(inputFile, outputDir, model)
     progressState.logFile = logFile
     progressState.pidFile = pidFile
     progressState.percent = 0
-    progressState.stage = "Starting..."
+    progressState.stage = "Starting.."
     progressState.startTime = os.time()
 
     -- Preflight checks so failures show up clearly in logs/UI.
@@ -10249,6 +11757,14 @@ local function startSeparationProcess(inputFile, outputDir, model)
         local f = io.open(p, "r")
         if f then f:close(); return true end
         return false
+    end
+    local function fileSizeBytes(p)
+        if not p then return -1 end
+        local f = io.open(p, "rb")
+        if not f then return -1 end
+        local sz = f:seek("end")
+        f:close()
+        return tonumber(sz) or -1
     end
 
     if not fileExists(inputFile) then
@@ -10260,7 +11776,29 @@ local function startSeparationProcess(inputFile, outputDir, model)
         if df then df:write("DONE\n"); df:close() end
         return
     end
-    if not fileExists(PYTHON_PATH) then
+    local inSz = fileSizeBytes(inputFile)
+    if not inSz or inSz <= 1024 then
+        local msg = "Input WAV is empty (0 samples): " .. tostring(inputFile)
+        debugLog(msg)
+        local lf = io.open(logFile, "w")
+        if lf then
+            lf:write(msg .. "\n")
+            lf:write("Hint: make a longer time selection / ensure selection overlaps items.\n")
+            lf:close()
+        end
+        local df = io.open(doneFile, "w")
+        if df then df:write("DONE\n"); df:close() end
+        return
+    end
+    -- Check if Python is available (handle both absolute paths and command names)
+    local pythonAvailable = false
+    if isAbsolutePath(PYTHON_PATH) then
+        pythonAvailable = fileExists(PYTHON_PATH)
+    else
+        pythonAvailable = canRunPython(PYTHON_PATH)
+    end
+
+    if not pythonAvailable then
         local msg = "Python not found at: " .. tostring(PYTHON_PATH)
         debugLog(msg)
         local lf = io.open(logFile, "w")
@@ -10306,9 +11844,10 @@ local function startSeparationProcess(inputFile, outputDir, model)
             local stdoutF = stdoutFile
             local stderrF = logFile
             local pidF = pidFile
+            local doneF = doneFile
 
             -- Build the PowerShell command that Start-Process the Python worker and writes PID
-            local psInner = "$p = Start-Process -FilePath '" .. python .. "' -ArgumentList @('-u','" .. sep .. "','" .. inF .. "','" .. outD .. "','--model','" .. m .. "','--device','" .. dev .. "') -WindowStyle Hidden -PassThru -RedirectStandardOutput '" .. stdoutF .. "' -RedirectStandardError '" .. stderrF .. "'; Set-Content -Path '" .. pidF .. "' -Value $p.Id -Encoding ascii"
+            local psInner = "$p = Start-Process -FilePath '" .. python .. "' -ArgumentList @('-u','" .. sep .. "','" .. inF .. "','" .. outD .. "','--model','" .. m .. "','--device','" .. dev .. "') -WindowStyle Hidden -PassThru -RedirectStandardOutput '" .. stdoutF .. "' -RedirectStandardError '" .. stderrF .. "'; Set-Content -Path '" .. pidF .. "' -Value $p.Id -Encoding ascii; Wait-Process -Id $p.Id; Set-Content -Path '" .. doneF .. "' -Value 'DONE' -Encoding ascii"
 
             -- VBS: create shell and run PowerShell command invisibly (0 = hidden window)
             vbsFile:write('Set sh = CreateObject("WScript.Shell")\n')
@@ -10329,14 +11868,62 @@ local function startSeparationProcess(inputFile, outputDir, model)
             debugLog('io.popen returned')
         end
     else
-        -- Unix: run in background
-        local deviceArg = SETTINGS.device or "auto"
-        local cmd = string.format(
-            '"%s" -u "%s" "%s" "%s" --model %s --device %s >"%s" 2>"%s" && echo DONE > "%s/done.txt" &',
-            PYTHON_PATH, SEPARATOR_SCRIPT, inputFile, outputDir, model, deviceArg, stdoutFile, logFile, outputDir
-        )
-        -- diagnostic launcher file removed
-        os.execute(cmd)
+        -- Unix: run in background so REAPER stays responsive and the progress window can update.
+        -- Launch a tiny sh script that starts the Python worker in the background, writes a pid.txt,
+        -- and writes done.txt only when the worker exits successfully.
+        local deviceArg = tostring(SETTINGS.device or "auto")
+        local modelArg  = tostring(model or SETTINGS.model or "htdemucs")
+
+        -- Create empty progress/log files (Python writes to these directly)
+        local sf = io.open(stdoutFile, "w")
+        if sf then sf:close() end
+        local lf = io.open(logFile, "w")
+        if lf then lf:close() end
+
+        local launcherPath = outputDir .. PATH_SEP .. "run_bg.sh"
+        local script = io.open(launcherPath, "w")
+        if script then
+            script:write("#!/bin/sh\n")
+            script:write("PY=" .. quoteArg(PYTHON_PATH) .. "\n")
+            script:write("SEP=" .. quoteArg(SEPARATOR_SCRIPT) .. "\n")
+            script:write("IN=" .. quoteArg(inputFile) .. "\n")
+            script:write("OUT=" .. quoteArg(outputDir) .. "\n")
+            script:write("MODEL=" .. quoteArg(modelArg) .. "\n")
+            script:write("DEVICE=" .. quoteArg(deviceArg) .. "\n")
+            script:write("STDOUT=" .. quoteArg(stdoutFile) .. "\n")
+            script:write("STDERR=" .. quoteArg(logFile) .. "\n")
+            script:write("DONE=" .. quoteArg(doneFile) .. "\n")
+            script:write("PIDFILE=" .. quoteArg(pidFile) .. "\n")
+            script:write("(\n")
+            script:write('  "$PY" -u "$SEP" "$IN" "$OUT" --model "$MODEL" --device "$DEVICE" >"$STDOUT" 2>"$STDERR"\n')
+            script:write("  rc=$?\n")
+            script:write('  if [ "$rc" -ne 0 ]; then echo "EXIT:$rc" >> "$STDERR"; fi\n')
+            script:write('  echo DONE > "$DONE"\n')
+            script:write(") &\n")
+            script:write('echo $! > "$PIDFILE"\n')
+            script:close()
+
+            local cmd = "sh " .. quoteArg(launcherPath) .. suppressStderr()
+            debugLog("Executing (background) launcher: " .. cmd)
+            os.execute(cmd)
+        else
+            -- If we couldn't write the launcher, fall back to a direct foreground run (old behavior).
+            local cmd = string.format(
+                '%s -u %s %s %s --model %s --device %s >%s 2>%s && echo DONE > %s',
+                quoteArg(PYTHON_PATH),
+                quoteArg(SEPARATOR_SCRIPT),
+                quoteArg(inputFile),
+                quoteArg(outputDir),
+                quoteArg(modelArg),
+                quoteArg(deviceArg),
+                quoteArg(stdoutFile),
+                quoteArg(logFile),
+                quoteArg(doneFile)
+            )
+            debugLog("Unix launcher write failed; executing (foreground) command: " .. cmd)
+            local rc = os.execute(cmd)
+            debugLog("Command finished with rc=" .. tostring(rc))
+        end
     end
 end
 
@@ -10346,6 +11933,8 @@ local function progressLoop()
     drawProgressWindow()
 
     local char = gfx.getchar()
+    local mouseDown = gfx.mouse_cap & 1 == 1
+    handleArtAdvance(progressState, mouseDown, char)
     if char == 26161 then  -- F1 key code
         -- Reserved (no-op for now). Keep input handling centralized here so ESC is never consumed elsewhere.
     end
@@ -10355,11 +11944,11 @@ local function progressLoop()
         isProcessingActive = false  -- Reset guard so workflow can be restarted
 
         -- Remember any size/position changes made during processing
-        captureWindowGeometry("STEMwerk - Processing...")
+        captureWindowGeometry("STEMwerk - Processing..")
         saveSettings()
 
         -- Best-effort kill of running worker (otherwise cancel leaves a hidden Python process running)
-        killWindowsProcessFromPidFile(progressState.pidFile)
+        killProcessFromPidFile(progressState.pidFile)
 
         gfx.quit()
 
@@ -10380,7 +11969,7 @@ local function progressLoop()
         progressState.running = false
 
         -- Remember any size/position changes made during processing
-        captureWindowGeometry("STEMwerk - Processing...")
+        captureWindowGeometry("STEMwerk - Processing..")
         saveSettings()
 
         gfx.quit()
@@ -10394,7 +11983,7 @@ local function progressLoop()
         isProcessingActive = false  -- Reset guard so workflow can be restarted
 
         -- Remember any size/position changes made during processing
-        captureWindowGeometry("STEMwerk - Processing...")
+        captureWindowGeometry("STEMwerk - Processing..")
         saveSettings()
 
         gfx.quit()
@@ -10477,7 +12066,7 @@ local function runSeparationWithProgress(inputFile, outputDir, model)
     end
 
     -- Open progress window
-    gfx.init("STEMwerk - Processing...", winW, winH, 0, winX, winY)
+    gfx.init("STEMwerk - Processing..", winW, winH, 0, winX, winY)
     progressWindowResizableSet = false  -- Reset so we try to make it resizable
     progressState.running = true
 
@@ -10761,6 +12350,7 @@ explodeTakesFromItem = function(item, mode, skipUndo)
 
                 reaper.InsertTrackAtIndex(insertIdx, true)
                 local newTrack = reaper.GetTrack(0, insertIdx)
+                ensureTrackHeight(newTrack)
                 insertIdx = insertIdx + 1
                 if newTrack then
                     reaper.GetSetMediaTrackInfo_String(newTrack, "P_NAME", takeName, true)
@@ -10890,6 +12480,7 @@ local function createStemTracks(item, stemPaths, itemPos, itemLen)
         reaper.GetSetMediaTrackInfo_String(folderTrack, "P_NAME", sourceName .. " - Stems", true)
         reaper.SetMediaTrackInfo_Value(folderTrack, "I_FOLDERDEPTH", 1)
         reaper.SetMediaTrackInfo_Value(folderTrack, "I_CUSTOMCOLOR", rgbToReaperColor(180, 140, 200))
+        ensureTrackHeight(folderTrack)
         trackIdx = trackIdx + 1
     end
 
@@ -10900,6 +12491,7 @@ local function createStemTracks(item, stemPaths, itemPos, itemLen)
             if stemPath then
                 reaper.InsertTrackAtIndex(trackIdx + importedCount, true)
                 local newTrack = reaper.GetTrack(0, trackIdx + importedCount)
+                ensureTrackHeight(newTrack)
 
                 local newTrackName = selectedCount == 1 and (stem.name .. " - " .. sourceName) or (sourceName .. " - " .. stem.name)
                 reaper.GetSetMediaTrackInfo_String(newTrack, "P_NAME", newTrackName, true)
@@ -11050,9 +12642,43 @@ local function getItemsInTimeRange(startTime, endTime, selectedOnly)
     return items
 end
 
--- Mute the selection portion of selected items within a time range
-local function muteSelectionInItems(startTime, endTime)
-    local items = getItemsInTimeRange(startTime, endTime, true)  -- selectedOnly = true
+-- Get overlapping items on a single track (optionally selected-only)
+local function getItemsInTimeRangeOnTrack(track, startTime, endTime, selectedOnly)
+    local items = {}
+    if not track or not reaper.ValidatePtr(track, "MediaTrack*") then return items end
+    local numItems = reaper.CountTrackMediaItems(track)
+    for i = 0, numItems - 1 do
+        local item = reaper.GetTrackMediaItem(track, i)
+        if item and reaper.ValidatePtr(item, "MediaItem*") then
+            local itemStart = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+            local itemEnd = itemStart + reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+            if itemStart < endTime and itemEnd > startTime then
+                if selectedOnly then
+                    if reaper.IsMediaItemSelected(item) then
+                        items[#items + 1] = item
+                    end
+                else
+                    items[#items + 1] = item
+                end
+            end
+        end
+    end
+    return items
+end
+
+-- Auto semantics: if any selected items overlap, operate on selected; otherwise operate on all overlapping.
+local function getItemsInTimeRangeAuto(startTime, endTime, sourceTrack)
+    if sourceTrack and reaper.ValidatePtr(sourceTrack, "MediaTrack*") then
+        local sel = getItemsInTimeRangeOnTrack(sourceTrack, startTime, endTime, true)
+        if #sel > 0 then return sel end
+        return getItemsInTimeRangeOnTrack(sourceTrack, startTime, endTime, false)
+    end
+    local sel = getItemsInTimeRange(startTime, endTime, true)
+    if #sel > 0 then return sel end
+    return getItemsInTimeRange(startTime, endTime, false)
+end
+
+local function muteSelectionInItemsFromList(items, startTime, endTime)
     for _, item in ipairs(items) do
         local track = reaper.GetMediaItem_Track(item)
         local origItemPos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
@@ -11075,9 +12701,13 @@ local function muteSelectionInItems(startTime, endTime)
     return #items
 end
 
--- Delete the selection portion of selected items within a time range
-local function deleteSelectionInItems(startTime, endTime)
-    local items = getItemsInTimeRange(startTime, endTime, true)  -- selectedOnly = true
+-- Mute the selection portion of items within a time range (selected-only by default via auto helper at call site)
+local function muteSelectionInItems(startTime, endTime)
+    local items = getItemsInTimeRange(startTime, endTime, true)  -- legacy behavior
+    return muteSelectionInItemsFromList(items, startTime, endTime)
+end
+
+local function deleteSelectionInItemsFromList(items, startTime, endTime)
     -- Process in reverse order to avoid index shifting issues
     for i = #items, 1, -1 do
         local item = items[i]
@@ -11102,6 +12732,12 @@ local function deleteSelectionInItems(startTime, endTime)
     return #items
 end
 
+-- Delete the selection portion of selected items within a time range (legacy default)
+local function deleteSelectionInItems(startTime, endTime)
+    local items = getItemsInTimeRange(startTime, endTime, true)  -- legacy behavior
+    return deleteSelectionInItemsFromList(items, startTime, endTime)
+end
+
 -- Create new tracks for stems from time selection (no original item)
 local function createStemTracksForSelection(stemPaths, selPos, selLen, sourceTrack)
     reaper.Undo_BeginBlock()
@@ -11124,7 +12760,12 @@ local function createStemTracksForSelection(stemPaths, selPos, selLen, sourceTra
                 local iend = ipos + ilen
                 if ipos < endSel and iend > startSel and reaper.IsMediaItemSelected(it) then
                     foundSelected = true
-                    table.insert(itemsToProcess, {item = it, pos = ipos, len = ilen})
+                    local p = math.max(ipos, startSel)
+                    local e = math.min(iend, endSel)
+                    local l = math.max(0, e - p)
+                    if l > 0.0005 then
+                        table.insert(itemsToProcess, {item = it, pos = p, len = l})
+                    end
                 end
             end
         end
@@ -11137,7 +12778,12 @@ local function createStemTracksForSelection(stemPaths, selPos, selLen, sourceTra
                     local ilen = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
                     local iend = ipos + ilen
                     if ipos < endSel and iend > startSel then
-                        table.insert(itemsToProcess, {item = it, pos = ipos, len = ilen})
+                        local p = math.max(ipos, startSel)
+                        local e = math.min(iend, endSel)
+                        local l = math.max(0, e - p)
+                        if l > 0.0005 then
+                            table.insert(itemsToProcess, {item = it, pos = p, len = l})
+                        end
                     end
                 end
             end
@@ -11177,6 +12823,7 @@ local function createStemTracksForSelection(stemPaths, selPos, selLen, sourceTra
             reaper.GetSetMediaTrackInfo_String(folderTrack, "P_NAME", sourceName .. " - Stems", true)
             reaper.SetMediaTrackInfo_Value(folderTrack, "I_FOLDERDEPTH", 1)
             reaper.SetMediaTrackInfo_Value(folderTrack, "I_CUSTOMCOLOR", rgbToReaperColor(180, 140, 200))
+            ensureTrackHeight(folderTrack)
             trackIdx = trackIdx + 1
         end
 
@@ -11187,6 +12834,7 @@ local function createStemTracksForSelection(stemPaths, selPos, selLen, sourceTra
                 if stemPath then
                     reaper.InsertTrackAtIndex(trackIdx + importedCount, true)
                     local newTrack = reaper.GetTrack(0, trackIdx + importedCount)
+                    ensureTrackHeight(newTrack)
                     local newTrackName = selectedCount == 1 and (stem.name .. " - " .. sourceName) or (sourceName .. " - " .. stem.name)
                     reaper.GetSetMediaTrackInfo_String(newTrack, "P_NAME", newTrackName, true)
                     local color = rgbToReaperColor(stem.color[1], stem.color[2], stem.color[3])
@@ -11235,6 +12883,7 @@ local function createStemTracksForSelection(stemPaths, selPos, selLen, sourceTra
             reaper.GetSetMediaTrackInfo_String(folderTrack, "P_NAME", sourceName .. " - Stems", true)
             reaper.SetMediaTrackInfo_Value(folderTrack, "I_FOLDERDEPTH", 1)
             reaper.SetMediaTrackInfo_Value(folderTrack, "I_CUSTOMCOLOR", rgbToReaperColor(180, 140, 200))
+            ensureTrackHeight(folderTrack)
             trackIdx = trackIdx + 1
         end
 
@@ -11248,6 +12897,7 @@ local function createStemTracksForSelection(stemPaths, selPos, selLen, sourceTra
                 if stemPath then
                     reaper.InsertTrackAtIndex(trackIdx + createdForThisItem, true)
                     local newTrack = reaper.GetTrack(0, trackIdx + createdForThisItem)
+                ensureTrackHeight(newTrack)
                     local newTrackName = selectedCount == 1 and (stem.name .. " - " .. sourceName) or (sourceName .. " - " .. stem.name)
                     reaper.GetSetMediaTrackInfo_String(newTrack, "P_NAME", newTrackName, true)
                     local color = rgbToReaperColor(stem.color[1], stem.color[2], stem.color[3])
@@ -11289,28 +12939,34 @@ function processStemsResult(stems)
     local count
     local mainItem
     local resultMsg
+    local resultData = nil
 
     if timeSelectionMode then
         -- Time selection mode: respect user's setting
         if SETTINGS.createNewTracks then
+            -- In multi-track mode, use the source track from the queue (for auto item selection & mute/delete semantics).
+            local sourceTrack = multiTrackQueue.active and multiTrackQueue.currentSourceTrack or nil
             -- Handle mute/delete options BEFORE creating stems (so new stems aren't affected)
             local actionMsg = ""
             if SETTINGS.muteOriginal then
-                -- Mute only SELECTED items that overlap with time selection
-                local items = getItemsInTimeRange(timeSelectionStart, timeSelectionEnd, true)
+                -- Mute items overlapping the selection:
+                -- - If any selected items overlap, mute selected ones (legacy behavior)
+                -- - Otherwise, mute all overlapping items on the source track (or project-wide if no source track)
+                local items = getItemsInTimeRangeAuto(timeSelectionStart, timeSelectionEnd, sourceTrack)
                 for _, item in ipairs(items) do
                     reaper.SetMediaItemInfo_Value(item, "B_MUTE", 1)
                 end
                 local itemWord = #items == 1 and "item" or "items"
                 actionMsg = "\n" .. #items .. " " .. itemWord .. " muted."
             elseif SETTINGS.muteSelection then
-                -- Mute selection portion of SELECTED items
-                local itemCount = muteSelectionInItems(timeSelectionStart, timeSelectionEnd)
+                -- Mute selection portion (auto semantics: selected-overlapping if any else all overlapping)
+                local items = getItemsInTimeRangeAuto(timeSelectionStart, timeSelectionEnd, sourceTrack)
+                local itemCount = muteSelectionInItemsFromList(items, timeSelectionStart, timeSelectionEnd)
                 local itemWord = itemCount == 1 and "item" or "items"
                 actionMsg = "\nSelection muted in " .. itemCount .. " " .. itemWord .. "."
             elseif SETTINGS.deleteOriginal then
-                -- Delete only SELECTED items that overlap with time selection
-                local items = getItemsInTimeRange(timeSelectionStart, timeSelectionEnd, true)
+                -- Delete items overlapping the selection (auto semantics)
+                local items = getItemsInTimeRangeAuto(timeSelectionStart, timeSelectionEnd, sourceTrack)
                 for i = #items, 1, -1 do
                     local item = items[i]
                     reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(item), item)
@@ -11318,14 +12974,13 @@ function processStemsResult(stems)
                 local itemWord = #items == 1 and "item" or "items"
                 actionMsg = "\n" .. #items .. " " .. itemWord .. " deleted."
             elseif SETTINGS.deleteSelection then
-                -- Delete selection portion of SELECTED items
-                local itemCount = deleteSelectionInItems(timeSelectionStart, timeSelectionEnd)
+                -- Delete selection portion (auto semantics)
+                local items = getItemsInTimeRangeAuto(timeSelectionStart, timeSelectionEnd, sourceTrack)
+                local itemCount = deleteSelectionInItemsFromList(items, timeSelectionStart, timeSelectionEnd)
                 local itemWord = itemCount == 1 and "item" or "items"
                 actionMsg = "\nSelection deleted from " .. itemCount .. " " .. itemWord .. "."
             end
             -- Now create stems (after mute/delete so they're not affected)
-            -- In multi-track mode, use the source track from the queue
-            local sourceTrack = multiTrackQueue.active and multiTrackQueue.currentSourceTrack or nil
             count = createStemTracksForSelection(stems, itemPos, itemLen, sourceTrack)
             local trackWord = count == 1 and "track" or "tracks"
             -- In multi-track mode, show which track we're on
@@ -11334,6 +12989,7 @@ function processStemsResult(stems)
                 trackInfo = " [Track " .. multiTrackQueue.currentIndex .. "/" .. multiTrackQueue.totalTracks .. ": " .. (multiTrackQueue.currentTrackName or "?") .. "]"
             end
             resultMsg = count .. " stem " .. trackWord .. " created from time selection." .. actionMsg .. trackInfo
+            resultData = { kind = "single", mainKey = "result_time_selection_created", count = count }
         else
             -- In-place mode: replace only the selected portion of the item
             if timeSelectionSourceItem then
@@ -11342,6 +12998,7 @@ function processStemsResult(stems)
                 local exploded = explodeTakesFromItem(mainItem, SETTINGS.postProcessTakes)
                 if exploded > 0 then
                     resultMsg = "Selection replaced and takes exploded."
+                    resultData = { kind = "single", mainKey = "result_selection_replaced_exploded" }
                 else
                     if mainItem and reaper.ValidatePtr(mainItem, "MediaItem*") then
                         local takeCount = reaper.CountTakes(mainItem) or 0
@@ -11382,6 +13039,7 @@ function processStemsResult(stems)
                         end
                     end
                     resultMsg = count == 1 and "Selection replaced with stem." or "Selection replaced with stems as takes (press T to switch)."
+                    resultData = { kind = "single", mainKey = (count == 1) and "result_selection_replaced_single" or "result_selection_replaced_takes_hint" }
                 end
             else
                 -- Fallback: create new tracks if no source item
@@ -11389,18 +13047,20 @@ function processStemsResult(stems)
                 count = createStemTracksForSelection(stems, itemPos, itemLen, sourceTrack)
                 local trackWord = count == 1 and "track" or "tracks"
                 resultMsg = count .. " stem " .. trackWord .. " created from time selection."
+                resultData = { kind = "single", mainKey = "result_time_selection_created", count = count }
             end
         end
     elseif SETTINGS.createNewTracks then
         count = createStemTracks(selectedItem, stems, itemPos, itemLen)
-        local action = SETTINGS.deleteOriginalTrack and "Track deleted." or
-                       (SETTINGS.deleteOriginal and "Item deleted." or
-                       (SETTINGS.deleteSelection and "Selection deleted." or
-                       (SETTINGS.muteOriginal and "Item muted." or
-                       (SETTINGS.muteSelection and "Selection muted." or ""))))
+        local actionKey = SETTINGS.deleteOriginalTrack and "result_track_deleted" or
+                          (SETTINGS.deleteOriginal and "result_item_deleted" or
+                          (SETTINGS.deleteSelection and "result_selection_deleted" or
+                          (SETTINGS.muteOriginal and "result_item_muted" or
+                          (SETTINGS.muteSelection and "result_selection_muted" or nil))))
         local trackWord = count == 1 and "track" or "tracks"
         resultMsg = count .. " stem " .. trackWord .. " created."
-        if action ~= "" then resultMsg = resultMsg .. "\n" .. action end
+        if actionKey then resultMsg = resultMsg .. "\n" .. (T(actionKey) or "") end
+        resultData = { kind = "single", mainKey = "result_stems_created_generic", count = count, actionKey = actionKey }
     else
         -- Check if we processed a sub-selection of the item
         if itemSubSelection then
@@ -11409,6 +13069,7 @@ function processStemsResult(stems)
             local exploded = explodeTakesFromItem(mainItem, SETTINGS.postProcessTakes)
             if exploded > 0 then
                 resultMsg = "Selection replaced and takes exploded."
+                resultData = { kind = "single", mainKey = "result_selection_replaced_exploded" }
             else
                 if mainItem and reaper.ValidatePtr(mainItem, "MediaItem*") then
                     local takeCount = reaper.CountTakes(mainItem) or 0
@@ -11418,12 +13079,14 @@ function processStemsResult(stems)
                     end
                 end
                 resultMsg = count == 1 and "Selection replaced with stem." or "Selection replaced with stems as takes (press T to switch)."
+                resultData = { kind = "single", mainKey = (count == 1) and "result_selection_replaced_single" or "result_selection_replaced_takes_hint" }
             end
         else
             count, mainItem = replaceInPlace(selectedItem, stems, itemPos, itemLen)
             local exploded = explodeTakesFromItem(mainItem, SETTINGS.postProcessTakes)
             if exploded > 0 then
                 resultMsg = "Stems created and takes exploded."
+                resultData = { kind = "single", mainKey = "result_stems_created_exploded" }
             else
                 if mainItem and reaper.ValidatePtr(mainItem, "MediaItem*") then
                     local takeCount = reaper.CountTakes(mainItem) or 0
@@ -11433,6 +13096,7 @@ function processStemsResult(stems)
                     end
                 end
                 resultMsg = count == 1 and "Stem replaced." or "Stems added as takes (press T to switch)."
+                resultData = { kind = "single", mainKey = (count == 1) and "result_stem_replaced" or "result_stems_added_takes_hint" }
             end
         end
     end
@@ -11454,15 +13118,18 @@ function processStemsResult(stems)
     local totalSecs = totalTime % 60
     local timeStr = string.format("%d:%02d", totalMins, totalSecs)
     resultMsg = resultMsg .. "\nTime: " .. timeStr
+    if resultData then
+        resultData.totalTimeSec = totalTime
+    end
 
     reaper.UpdateArrange()
 
     -- Show custom result window
-    showResultWindow(selectedStemData, resultMsg)
+    showResultWindow(selectedStemData, resultData or resultMsg)
 end
 
--- Result window state
-local resultWindowState = {
+-- Result window state (global to avoid exceeding Lua's 200 local limit in the main chunk)
+resultWindowState = {
     selectedStems = {},
     message = "",
     running = false,
@@ -11473,10 +13140,10 @@ local resultWindowState = {
 
 -- One-shot flag to bypass the single-instance window check.
 -- Used when we just closed a gfx window and immediately re-open the main UI.
-local skipExistingWindowCheckOnce = false
+skipExistingWindowCheckOnce = false
 
--- Initialize celebration effects
-local function initCelebration()
+-- Initialize celebration effects (global to avoid exceeding Lua's 200 local limit in the main chunk)
+function initCelebration()
     resultWindowState.startTime = os.clock()
     resultWindowState.confetti = {}
     resultWindowState.rings = {}
@@ -11507,13 +13174,20 @@ local function initCelebration()
 end
 
 -- Draw result window (clean style matching main app)
-local function drawResultWindow()
+function drawResultWindow()
     local w, h = gfx.w, gfx.h
 
     -- Calculate scale
     local scale = math.min(w / 380, h / 340)
     scale = math.max(0.5, math.min(4.0, scale))
     local function PS(val) return math.floor(val * scale + 0.5) end
+
+    -- Tooltip (simple, single-line like progress window)
+    local tooltipText = nil
+    local tooltipX, tooltipY = 0, 0
+
+    local mx, my = gfx.mouse_x, gfx.mouse_y
+    local mouseDown = gfx.mouse_cap & 1 == 1
 
     -- === PROCEDURAL ART AS FULL BACKGROUND LAYER ===
     -- Pure black/white background first
@@ -11535,208 +13209,24 @@ local function drawResultWindow()
     end
     gfx.rect(0, 0, w, h, 1)
 
-    -- Theme toggle button (sun/moon icon, top right)
-    local themeSize = PS(20)
-    local themeX = w - themeSize - PS(10)
-    local themeY = PS(8)
-    local mx, my = gfx.mouse_x, gfx.mouse_y
-    local themeHover = mx >= themeX and mx <= themeX + themeSize and my >= themeY and my <= themeY + themeSize
-    local mouseDown = gfx.mouse_cap & 1 == 1
-
-    -- Draw theme toggle (circle with rays for sun, crescent for moon)
-    if SETTINGS.darkMode then
-        -- Moon icon (crescent)
-        gfx.set(0.7, 0.7, 0.5, themeHover and 1 or 0.6)
-        gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/2 - 2, 1, 1)
-        gfx.set(0, 0, 0, 1)  -- Pure black for moon overlay
-        gfx.circle(themeX + themeSize/2 + 4, themeY + themeSize/2 - 3, themeSize/2 - 3, 1, 1)
-    else
-        -- Sun icon
-        gfx.set(0.9, 0.7, 0.2, themeHover and 1 or 0.8)
-        gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/3, 1, 1)
-        -- Rays
-        for i = 0, 7 do
-            local angle = i * math.pi / 4
-            local x1 = themeX + themeSize/2 + math.cos(angle) * (themeSize/3 + 2)
-            local y1 = themeY + themeSize/2 + math.sin(angle) * (themeSize/3 + 2)
-            local x2 = themeX + themeSize/2 + math.cos(angle) * (themeSize/2 - 1)
-            local y2 = themeY + themeSize/2 + math.sin(angle) * (themeSize/2 - 1)
-            gfx.line(x1, y1, x2, y2)
-        end
-    end
-
-    -- Handle theme toggle click
-    if themeHover and mouseDown and not resultWindowState.wasMouseDown then
-        SETTINGS.darkMode = not SETTINGS.darkMode
-        updateTheme()
-        saveSettings()  -- Persist theme change
-    end
-
-    -- Language toggle (next to theme)
-    local langW = PS(22)
-    local langH = PS(14)
-    local langX = themeX - langW - PS(6)
-    local langY = themeY + (themeSize - langH) / 2
-    local langHover = mx >= langX and mx <= langX + langW and my >= langY and my <= langY + langH
-
-    gfx.setfont(1, "Arial", PS(9), string.byte('b'))
-    local langCode = string.upper(SETTINGS.language or "EN")
-    local langTextW = gfx.measurestr(langCode)
-
-    if langHover then
-        gfx.set(0.4, 0.6, 0.9, 1)
-        if mouseDown and not resultWindowState.wasMouseDown then
-            local langs = {"en", "nl", "de"}
-            local currentIdx = 1
-            for i, l in ipairs(langs) do
-                if l == SETTINGS.language then currentIdx = i; break end
-            end
-            local nextIdx = (currentIdx % #langs) + 1
-            setLanguage(langs[nextIdx])
-            saveSettings()
-        end
-    else
-        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 0.8)
-    end
-    gfx.x = langX + (langW - langTextW) / 2
-    gfx.y = langY
-    gfx.drawstr(langCode)
-
-    -- Success icon (simple green circle with checkmark)
-    local iconX = w / 2
-    local iconY = PS(60)
-    local iconR = PS(28)
-
-    -- Green circle
-    gfx.set(0.2, 0.65, 0.35, 1)
-    gfx.circle(iconX, iconY, iconR, 1, 1)
-
-    -- White checkmark
-    gfx.set(1, 1, 1, 1)
-    local cx, cy = iconX, iconY
-    -- First part of checkmark
-    local x1, y1 = cx - PS(10), cy
-    local x2, y2 = cx - PS(3), cy + PS(8)
-    gfx.line(x1, y1, x2, y2)
-    gfx.line(x1, y1+1, x2, y2+1)
-    -- Second part of checkmark
-    local x3, y3 = cx + PS(10), cy - PS(7)
-    gfx.line(x2, y2, x3, y3)
-    gfx.line(x2, y2+1, x3, y3+1)
-
-    -- Title with colored STEM letters: "STEMwerk Complete!"
-    gfx.setfont(1, "Arial", PS(18), string.byte('b'))
-
-    -- STEM colors (same as main button)
-    local stemLetterColors = {
-        {255, 100, 100},  -- S = Vocals (red)
-        {100, 200, 255},  -- T = Drums (blue)
-        {150, 100, 255},  -- E = Bass (purple)
-        {100, 255, 150},  -- M = Other (green)
+    local controlsCtx = {
+        w = w,
+        h = h,
+        PS = PS,
+        mx = mx,
+        my = my,
+        mouseDown = mouseDown,
+        tooltipText = tooltipText,
+        tooltipX = tooltipX,
+        tooltipY = tooltipY,
     }
+    drawResultWindowControls(controlsCtx)
+    tooltipText = controlsCtx.tooltipText
+    tooltipX = controlsCtx.tooltipX
+    tooltipY = controlsCtx.tooltipY
 
-    local stemPart = "STEM"
-    local restPart = "werk Complete!"
-    local stemW = gfx.measurestr(stemPart)
-    local restW = gfx.measurestr(restPart)
-    local totalW = stemW + restW
-    local titleX = (w - totalW) / 2
-    local titleY = PS(100)
-
-    -- Draw STEM with individual colored letters
-    local charX = titleX
-    for i = 1, 4 do
-        local char = stemPart:sub(i, i)
-        local color = stemLetterColors[i]
-        gfx.set(color[1]/255, color[2]/255, color[3]/255, 1)
-        gfx.x = charX
-        gfx.y = titleY
-        gfx.drawstr(char)
-        charX = charX + gfx.measurestr(char)
-    end
-
-    -- Draw rest of title in normal text color
-    gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
-    gfx.x = charX
-    gfx.y = titleY
-    gfx.drawstr(restPart)
-
-    -- Stem indicators (simple colored boxes)
-    local stemY = PS(125)
-    local stemBoxSize = PS(14)
-    gfx.setfont(1, "Arial", PS(11))
-
-    -- Calculate total width to center
-    local totalStemWidth = 0
-    for _, stem in ipairs(resultWindowState.selectedStems) do
-        totalStemWidth = totalStemWidth + stemBoxSize + gfx.measurestr(stem.name) + PS(16)
-    end
-    local stemX = (w - totalStemWidth) / 2
-
-    for _, stem in ipairs(resultWindowState.selectedStems) do
-        -- Stem color box
-        gfx.set(stem.color[1]/255, stem.color[2]/255, stem.color[3]/255, 1)
-        gfx.rect(stemX, stemY, stemBoxSize, stemBoxSize, 1)
-
-        -- Stem name
-        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-        gfx.x = stemX + stemBoxSize + PS(5)
-        gfx.y = stemY + PS(1)
-        gfx.drawstr(stem.name)
-        stemX = stemX + stemBoxSize + gfx.measurestr(stem.name) + PS(16)
-    end
-
-    -- Target info (output mode)
-    local targetY = PS(150)
-    gfx.setfont(1, "Arial", PS(10))
-    gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
-    local targetText = "Target: "
-    if SETTINGS.createNewTracks then
-        targetText = targetText .. "New tracks"
-        if SETTINGS.createFolder then targetText = targetText .. " (folder)" end
-    else
-        targetText = targetText .. "In-place (as takes)"
-    end
-    -- Add action info
-    if SETTINGS.muteOriginal then
-        targetText = targetText .. " | Mute original"
-    elseif SETTINGS.muteSelection then
-        targetText = targetText .. " | Mute selection"
-    elseif SETTINGS.deleteOriginal then
-        targetText = targetText .. " | Delete original"
-    elseif SETTINGS.deleteSelection then
-        targetText = targetText .. " | Delete selection"
-    elseif SETTINGS.deleteOriginalTrack then
-        targetText = targetText .. " | Delete track"
-    end
-    local targetW = gfx.measurestr(targetText)
-    gfx.x = (w - targetW) / 2
-    gfx.y = targetY
-    gfx.drawstr(targetText)
-
-    -- Result message box
-    local msgBoxY = PS(170)
-    local msgBoxH = PS(70)
-    gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 1)
-    gfx.rect(PS(20), msgBoxY, w - PS(40), msgBoxH, 1)
-    gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
-    gfx.rect(PS(20), msgBoxY, w - PS(40), msgBoxH, 0)
-
-    -- Result message text
-    gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
-    gfx.setfont(1, "Arial", PS(11))
-    local msgLines = {}
-    for line in (resultWindowState.message .. "\n"):gmatch("([^\n]*)\n") do
-        table.insert(msgLines, line)
-    end
-    local msgY = msgBoxY + PS(8)
-    for _, line in ipairs(msgLines) do
-        local lineW = gfx.measurestr(line)
-        gfx.x = (w - lineW) / 2
-        gfx.y = msgY
-        gfx.drawstr(line)
-        msgY = msgY + PS(13)
-    end
+    renderResultTitleArea({ w = w, PS = PS })
+    renderResultMessageBox({ w = w, h = h, PS = PS })
 
     -- OK button (rounded pill style like main app)
     local btnW = PS(70)
@@ -11767,7 +13257,7 @@ local function drawResultWindow()
     -- Button text
     gfx.set(1, 1, 1, 1)
     gfx.setfont(1, "Arial", PS(13), string.byte('b'))
-    local okText = "OK"
+    local okText = T("ok") or "OK"
     local okW = gfx.measurestr(okText)
     gfx.x = btnX + (btnW - okW) / 2
     gfx.y = btnY + (btnH - PS(13)) / 2
@@ -11776,7 +13266,7 @@ local function drawResultWindow()
     -- Hint at very bottom edge
     gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 1)
     gfx.setfont(1, "Arial", PS(9))
-    local hint = "Enter / Space / ESC"
+    local hint = T("complete_hint_keys") or "Enter / ESC"
     local hintW = gfx.measurestr(hint)
     gfx.x = (w - hintW) / 2
     gfx.y = h - PS(12)
@@ -11808,19 +13298,34 @@ local function drawResultWindow()
     if hover and mouseDown and not resultWindowState.wasMouseDown then
         return true  -- Close
     end
+    if hover then
+        tooltipText = T("complete_ok_tooltip") or "Close (Enter / ESC)"
+        tooltipX, tooltipY = mx + PS(10), my + PS(15)
+    end
 
     resultWindowState.wasMouseDown = mouseDown
+    resultWindowState.wasRightMouseDown = (gfx.mouse_cap & 2 == 2)
 
     local char = gfx.getchar()
-    if char == -1 or char == 27 or char == 13 or char == 32 then  -- Window closed, ESC, Enter, or Space
+    handleArtAdvance(resultWindowState, mouseDown, char)
+    if char == -1 or char == 27 or char == 13 then  -- Window closed, ESC, Enter
         return true  -- Close
+    end
+
+    -- Tooltip draw (match main style: stem-color bar + wrapping)
+    if tooltipText then
+        gfx.setfont(1, "Arial", PS(11))
+        local padding = PS(8)
+        local lineH = PS(14)
+        local maxTextW = math.min(w * 0.62, PS(520))
+        drawTooltipStyled(tooltipText, tooltipX, tooltipY, w, h, padding, lineH, maxTextW)
     end
 
     return false  -- Keep open
 end
 
 -- Result window loop
-local function resultWindowLoop()
+function resultWindowLoop()
     -- Save window position for next time
     if reaper.JS_Window_GetRect then
         local hwnd = reaper.JS_Window_Find("STEMwerk - Complete", true)
@@ -11863,7 +13368,13 @@ function showResultWindow(selectedStems, message)
     updateTheme()
 
     resultWindowState.selectedStems = selectedStems
-    resultWindowState.message = message
+    if type(message) == "table" then
+        resultWindowState.messageData = message
+        resultWindowState.message = ""
+    else
+        resultWindowState.messageData = nil
+        resultWindowState.message = message
+    end
     resultWindowState.wasMouseDown = false
 
     -- Initialize celebration effects
@@ -12122,22 +13633,70 @@ startSeparationProcessForJob = function(job, segmentSize)
     job.logFile = logFile
     job.pidFile = pidFile
     job.percent = 0
-    job.stage = "Starting..."
+    job.stage = "Starting.."
     job.startTime = os.time()
 
-    if OS == "Windows" then
-        -- Create empty progress/log files (Python writes to these directly)
-        local sf = io.open(stdoutFile, "w")
-        if sf then sf:close() end
+    -- Preflight checks so failures show up clearly in logs/UI.
+    if not fileExists(job.inputFile) then
+        local msg = "Input file missing: " .. tostring(job.inputFile)
+        debugLog(msg)
         local lf = io.open(logFile, "w")
-        if lf then lf:close() end
+        if lf then lf:write(msg .. "\n"); lf:close() end
+        local df = io.open(doneFile, "w")
+        if df then df:write("DONE\n"); df:close() end
+        return
+    end
+    local inSz = fileSizeBytes(job.inputFile)
+    if not inSz or inSz <= 1024 then
+        local msg = "Input WAV is empty (0 samples): " .. tostring(job.inputFile)
+        debugLog(msg)
+        local lf = io.open(logFile, "w")
+        if lf then
+            lf:write(msg .. "\n")
+            lf:write("Hint: extraction failed; see input.wav.ffmpeg.log next to the input file.\n")
+            lf:close()
+        end
+        local df = io.open(doneFile, "w")
+        if df then df:write("DONE\n"); df:close() end
+        return
+    end
+    local pythonAvailable = false
+    if isAbsolutePath(PYTHON_PATH) then
+        pythonAvailable = fileExists(PYTHON_PATH)
+    else
+        pythonAvailable = canRunPython(PYTHON_PATH)
+    end
+    if not pythonAvailable then
+        local msg = "Python not found at: " .. tostring(PYTHON_PATH)
+        debugLog(msg)
+        local lf = io.open(logFile, "w")
+        if lf then lf:write(msg .. "\n"); lf:close() end
+        local df = io.open(doneFile, "w")
+        if df then df:write("DONE\n"); df:close() end
+        return
+    end
+    if not fileExists(SEPARATOR_SCRIPT) then
+        local msg = "Separator script not found at: " .. tostring(SEPARATOR_SCRIPT)
+        debugLog(msg)
+        local lf = io.open(logFile, "w")
+        if lf then lf:write(msg .. "\n"); lf:close() end
+        local df = io.open(doneFile, "w")
+        if df then df:write("DONE\n"); df:close() end
+        return
+    end
 
-        -- Launch Python hidden WITHOUT a .bat/.cmd (prevents console windows).
-        -- Use WMI Win32_Process.Create to get a PID for proper cancel.
-        local deviceArg = SETTINGS.device or "auto"
+    -- Create empty progress/log files (Python writes to these directly)
+    local sf = io.open(stdoutFile, "w")
+    if sf then sf:close() end
+    local lf = io.open(logFile, "w")
+    if lf then lf:close() end
 
-        -- Write a tiny VBS launcher that runs PowerShell invisibly via wscript
-        local vbsPath = job.trackDir .. PATH_SEP .. "run_hidden.vbs"
+    local deviceArg = tostring(SETTINGS.device or "auto")
+    local modelArg  = tostring(SETTINGS.model or "htdemucs")
+
+    if OS == "Windows" then
+        -- Windows: hidden PowerShell runner (async) that also writes pid.txt and done.txt.
+        local vbsPath = job.trackDir .. PATH_SEP .. ("run_hidden_job_" .. tostring(job.index or 0) .. ".vbs")
         local vbsFile = io.open(vbsPath, "w")
         if vbsFile then
             local function q(s) return tostring(s or "") end
@@ -12145,40 +13704,94 @@ startSeparationProcessForJob = function(job, segmentSize)
             local sep = q(SEPARATOR_SCRIPT)
             local inF = q(job.inputFile)
             local outD = q(job.trackDir)
-            local m = tostring(SETTINGS.model)
+            local m = tostring(modelArg)
             local dev = tostring(deviceArg)
             local stdoutF = stdoutFile
             local stderrF = logFile
             local pidF = pidFile
+            local doneF = doneFile
 
-            local psInner = "$p = Start-Process -FilePath '" .. python .. "' -ArgumentList @('-u','" .. sep .. "','" .. inF .. "','" .. outD .. "','--model','" .. m .. "','--device','" .. dev .. "') -WindowStyle Hidden -PassThru -RedirectStandardOutput '" .. stdoutF .. "' -RedirectStandardError '" .. stderrF .. "'; Set-Content -Path '" .. pidF .. "' -Value $p.Id -Encoding ascii"
+            local psInner =
+                "$p = Start-Process -FilePath '" .. python .. "' -ArgumentList @('-u','" .. sep .. "','" .. inF .. "','" .. outD .. "','--model','" .. m .. "','--device','" .. dev .. "') -WindowStyle Hidden -PassThru -RedirectStandardOutput '" .. stdoutF .. "' -RedirectStandardError '" .. stderrF .. "';" ..
+                " Set-Content -Path '" .. pidF .. "' -Value $p.Id -Encoding ascii;" ..
+                " Wait-Process -Id $p.Id;" ..
+                " Set-Content -Path '" .. doneF .. "' -Value 'DONE' -Encoding ascii"
 
             vbsFile:write('Set sh = CreateObject("WScript.Shell")\n')
             vbsFile:write('cmd = "powershell -NoProfile -ExecutionPolicy Bypass -Command ""' .. psInner .. '"""\n')
             vbsFile:write('sh.Run cmd, 0, False\n')
             vbsFile:close()
-        end
 
-        local wscriptCmd = 'wscript "' .. vbsPath .. '"'
-        if reaper.ExecProcess then
-            debugLog('Calling reaper.ExecProcess: ' .. wscriptCmd)
-            reaper.ExecProcess(wscriptCmd, -1)
-            debugLog('reaper.ExecProcess called for job ' .. tostring(job.index))
+            local wscriptCmd = 'wscript "' .. vbsPath .. '"'
+            debugLog('Starting job ' .. tostring(job.index) .. ' (async): ' .. wscriptCmd)
+            if reaper.ExecProcess then
+                reaper.ExecProcess(wscriptCmd, -1)
+            else
+                local handle = io.popen(wscriptCmd)
+                if handle then handle:close() end
+            end
         else
-            debugLog('Calling io.popen for: ' .. wscriptCmd)
-            local handle = io.popen(wscriptCmd)
-            if handle then handle:close() end
-            debugLog('io.popen returned for job ' .. tostring(job.index))
+            -- Fallback: run in foreground (old behavior)
+            local cmd = string.format(
+                '%s -u %s %s %s --model %s --device %s >%s 2>%s && echo DONE >%s',
+                quoteArg(PYTHON_PATH),
+                quoteArg(SEPARATOR_SCRIPT),
+                quoteArg(job.inputFile),
+                quoteArg(job.trackDir),
+                quoteArg(modelArg),
+                quoteArg(deviceArg),
+                quoteArg(stdoutFile),
+                quoteArg(logFile),
+                quoteArg(doneFile)
+            )
+            debugLog('Job ' .. tostring(job.index) .. ' launcher write failed; executing (foreground): ' .. tostring(cmd))
+            os.execute(cmd)
         end
     else
-        -- macOS/Linux
-        local deviceArg = SETTINGS.device or "auto"
-        local cmd = '"' .. PYTHON_PATH .. '" -u "' .. SEPARATOR_SCRIPT .. '" '
-        cmd = cmd .. '"' .. job.inputFile .. '" "' .. job.trackDir .. '" --model ' .. SETTINGS.model .. ' --device ' .. deviceArg
-        cmd = cmd .. ' >"' .. stdoutFile .. '" 2>"' .. logFile .. '" && echo DONE >"' .. doneFile .. '" &'
-        -- diagnostic launcher file removed
-        debugLog('Executing background command for job ' .. tostring(job.index) .. ': ' .. tostring(cmd))
-        os.execute(cmd)
+        -- Unix: background sh launcher that writes pid.txt and done.txt.
+        local launcherPath = job.trackDir .. PATH_SEP .. "run_bg.sh"
+        local script = io.open(launcherPath, "w")
+        if script then
+            script:write("#!/bin/sh\n")
+            script:write("PY=" .. quoteArg(PYTHON_PATH) .. "\n")
+            script:write("SEP=" .. quoteArg(SEPARATOR_SCRIPT) .. "\n")
+            script:write("IN=" .. quoteArg(job.inputFile) .. "\n")
+            script:write("OUT=" .. quoteArg(job.trackDir) .. "\n")
+            script:write("MODEL=" .. quoteArg(modelArg) .. "\n")
+            script:write("DEVICE=" .. quoteArg(deviceArg) .. "\n")
+            script:write("STDOUT=" .. quoteArg(stdoutFile) .. "\n")
+            script:write("STDERR=" .. quoteArg(logFile) .. "\n")
+            script:write("DONE=" .. quoteArg(doneFile) .. "\n")
+            script:write("PIDFILE=" .. quoteArg(pidFile) .. "\n")
+            script:write("(\n")
+            script:write('  "$PY" -u "$SEP" "$IN" "$OUT" --model "$MODEL" --device "$DEVICE" >"$STDOUT" 2>"$STDERR"\n')
+            script:write("  rc=$?\n")
+            script:write('  if [ "$rc" -ne 0 ]; then echo "EXIT:$rc" >> "$STDERR"; fi\n')
+            script:write('  echo DONE > "$DONE"\n')
+            script:write(") &\n")
+            script:write('echo $! > "$PIDFILE"\n')
+            script:close()
+
+            local cmd = "sh " .. quoteArg(launcherPath) .. suppressStderr()
+            debugLog("Starting job " .. tostring(job.index) .. " (async): " .. cmd)
+            os.execute(cmd)
+        else
+            -- Fallback: run in foreground
+            local cmd = string.format(
+                '%s -u %s %s %s --model %s --device %s >%s 2>%s && echo DONE >%s',
+                quoteArg(PYTHON_PATH),
+                quoteArg(SEPARATOR_SCRIPT),
+                quoteArg(job.inputFile),
+                quoteArg(job.trackDir),
+                quoteArg(modelArg),
+                quoteArg(deviceArg),
+                quoteArg(stdoutFile),
+                quoteArg(logFile),
+                quoteArg(doneFile)
+            )
+            debugLog('Job ' .. tostring(job.index) .. ' launcher write failed; executing (foreground): ' .. tostring(cmd))
+            os.execute(cmd)
+        end
     end
 end
 
@@ -12223,7 +13836,7 @@ updateAllJobsProgress = function()
         else
             -- Job not yet started (sequential mode)
             job.percent = 0
-            job.stage = "Waiting..."
+            job.stage = "Waiting.."
         end
     end
 end
@@ -12246,7 +13859,7 @@ getOverallProgress = function()
 end
 
 -- Draw multi-track progress window
-local function drawMultiTrackProgressWindow()
+function drawMultiTrackProgressWindow()
     local w, h = gfx.w, gfx.h
 
     -- Scale
@@ -12257,10 +13870,12 @@ local function drawMultiTrackProgressWindow()
     -- Mouse position for UI interactions
     local mx, my = gfx.mouse_x, gfx.mouse_y
     local mouseDown = gfx.mouse_cap & 1 == 1
+    local rightMouseDown = gfx.mouse_cap & 2 == 2
 
-    -- Tooltip tracking
+    -- Tooltip tracking / UI click tracking (for background art click)
     local tooltipText = nil
     local tooltipX, tooltipY = 0, 0
+    GUI.uiClickedThisFrame = false
 
     -- === PROCEDURAL ART AS FULL BACKGROUND LAYER ===
     -- Pure black/white background first
@@ -12283,7 +13898,8 @@ local function drawMultiTrackProgressWindow()
     gfx.rect(0, 0, w, h, 1)
 
     -- === THEME TOGGLE (top right) ===
-    local themeSize = PS(18)
+    local iconScale = 0.66
+    local themeSize = math.max(PS(11), math.floor(PS(18) * iconScale + 0.5))
     local themeX = w - themeSize - PS(8)
     local themeY = PS(6)
     local themeHover = mx >= themeX and mx <= themeX + themeSize and my >= themeY and my <= themeY + themeSize
@@ -12308,6 +13924,7 @@ local function drawMultiTrackProgressWindow()
 
     -- Theme click and tooltip
     if themeHover then
+        GUI.uiClickedThisFrame = true
         tooltipText = SETTINGS.darkMode and T("switch_light") or T("switch_dark")
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
         if mouseDown and not multiTrackQueue.wasMouseDown then
@@ -12318,7 +13935,7 @@ local function drawMultiTrackProgressWindow()
     end
 
     -- === FX TOGGLE (below theme icon) ===
-    local fxSize = PS(16)
+    local fxSize = math.max(PS(10), math.floor(PS(16) * iconScale + 0.5))
     local fxX = themeX + (themeSize - fxSize) / 2
     local fxY = themeY + themeSize + PS(3)
     local fxHover = mx >= fxX - PS(2) and mx <= fxX + fxSize + PS(2) and my >= fxY - PS(2) and my <= fxY + fxSize + PS(2)
@@ -12346,6 +13963,7 @@ local function drawMultiTrackProgressWindow()
     end
 
     if fxHover then
+        GUI.uiClickedThisFrame = true
         tooltipText = SETTINGS.visualFX and T("fx_disable") or T("fx_enable")
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
     end
@@ -12356,7 +13974,7 @@ local function drawMultiTrackProgressWindow()
 
     -- Title / branding
     gfx.setfont(1, "Arial", PS(16), string.byte('b'))
-    local modeStr = multiTrackQueue.sequentialMode and "Sequential" or "Parallel"
+    local modeStr = multiTrackQueue.sequentialMode and (T("sequential") or "Sequential") or (T("parallel") or "Parallel")
     local titleX = PS(20)
     local titleY = PS(25)
 
@@ -12396,9 +14014,14 @@ local function drawMultiTrackProgressWindow()
     local langTextW = gfx.measurestr(langCode)
 
     if langHover then
+        GUI.uiClickedThisFrame = true
         gfx.set(0.4, 0.6, 0.9, 1)
         tooltipText = T("tooltip_change_language")
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
+        if rightMouseDown and not (multiTrackQueue.wasRightMouseDown or false) then
+            SETTINGS.tooltips = not SETTINGS.tooltips
+            saveSettings()
+        end
         if mouseDown and not multiTrackQueue.wasMouseDown then
             -- Cycle through languages
             local langs = {"en", "nl", "de"}
@@ -12491,7 +14114,7 @@ local function drawMultiTrackProgressWindow()
         gfx.x = barX
         gfx.y = yPos
         local displayName = job.trackName
-        if #displayName > 20 then displayName = displayName:sub(1, 17) .. "..." end
+        if #displayName > 20 then displayName = displayName:sub(1, 17) .. ".." end
         gfx.drawstr(displayName)
 
         -- Track progress bar
@@ -12520,7 +14143,12 @@ local function drawMultiTrackProgressWindow()
             gfx.setfont(1, "Arial", PS(9))
             gfx.set(1, 1, 1, 0.95)
             local stageText = job.stage
-            if #stageText > 35 then stageText = stageText:sub(1, 32) .. "..." end
+            if stageText == "Waiting.." or stageText == "Waiting..." then
+                stageText = T("waiting") or stageText
+            elseif stageText == "Starting.." or stageText == "Starting..." then
+                stageText = T("starting") or stageText
+            end
+            if #stageText > 35 then stageText = stageText:sub(1, 32) .. ".." end
             gfx.x = tBarX + PS(5)
             gfx.y = yPos + PS(3)
             gfx.drawstr(stageText)
@@ -12532,7 +14160,7 @@ local function drawMultiTrackProgressWindow()
             gfx.set(0.3, 0.75, 0.4, 1)
             gfx.x = tBarX + tBarW + PS(8)
             gfx.y = yPos + PS(2)
-            gfx.drawstr("Done")
+            gfx.drawstr(T("mt_done_label") or "Done")
         else
             gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
             gfx.x = tBarX + tBarW + PS(8)
@@ -12587,7 +14215,6 @@ local function drawMultiTrackProgressWindow()
     gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
 
     -- Count expected stems
-    local stemsPerTrack = SETTINGS.model == "htdemucs_6s" and 6 or 4
     local selectedStemCount = 0
     for _, stem in ipairs(STEMS) do
         if stem.selected then selectedStemCount = selectedStemCount + 1 end
@@ -12595,8 +14222,8 @@ local function drawMultiTrackProgressWindow()
     local expectedStems = numJobs * selectedStemCount
 
     -- Line 1: Status overview
-    local statusText = string.format("Tracks: %d/%d | Audio: %.1fs/%.1fs | Stems: %d expected",
-        completedJobs, numJobs, completedAudioDur, totalAudioDur, expectedStems)
+    local statusFmt = T("mt_status_line") or "Tracks: %d/%d | Audio: %.1fs/%.1fs | Stems: %d expected"
+    local statusText = string.format(statusFmt, completedJobs, numJobs, completedAudioDur, totalAudioDur, expectedStems)
     gfx.x = barX
     gfx.y = infoY
     gfx.drawstr(statusText)
@@ -12604,15 +14231,17 @@ local function drawMultiTrackProgressWindow()
     -- Line 2: Speed and ETA
     local speedText = ""
     if realtimeFactor > 0 then
-        speedText = string.format("Speed: %.2fx realtime", realtimeFactor)
+        local speedFmt = T("mt_speed_line") or "Speed: %.2fx realtime"
+        speedText = string.format(speedFmt, realtimeFactor)
     else
-        speedText = "Speed: calculating..."
+        speedText = T("mt_speed_calc") or "Speed: calculating.."
     end
     local etaText = ""
     if eta > 0 then
         local etaMins = math.floor(eta / 60)
         local etaSecs = math.floor(eta % 60)
-        etaText = string.format(" | ETA: %d:%02d remaining", etaMins, etaSecs)
+        local etaFmt = T("mt_eta_suffix") or " | ETA: %d:%02d remaining"
+        etaText = string.format(etaFmt, etaMins, etaSecs)
     end
     gfx.x = barX
     gfx.y = infoY + PS(16)
@@ -12624,21 +14253,113 @@ local function drawMultiTrackProgressWindow()
         local jobMins = math.floor(jobElapsed / 60)
         local jobSecs = jobElapsed % 60
         local audioDurStr = activeJob.audioDuration and string.format("%.1fs", activeJob.audioDuration) or "?"
-        local infoText = string.format("Current: %s (%s) | %d:%02d elapsed",
-            activeJob.trackName or "?",
-            audioDurStr,
-            jobMins, jobSecs)
+        local infoFmt = T("mt_current_line") or "Current: %s (%s) | %d:%02d elapsed"
+        local infoText = string.format(infoFmt, activeJob.trackName or "?", audioDurStr, jobMins, jobSecs)
         gfx.x = barX
         gfx.y = infoY + PS(48)
         gfx.drawstr(infoText)
 
         -- Line 5: Media item info
         local itemInfo = activeJob.itemNames or "Unknown"
-        if #itemInfo > 55 then itemInfo = itemInfo:sub(1, 52) .. "..." end
+        if #itemInfo > 55 then itemInfo = itemInfo:sub(1, 52) .. ".." end
         gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 1)
         gfx.x = barX
         gfx.y = infoY + PS(64)
-        gfx.drawstr("Media: " .. itemInfo)
+        gfx.drawstr((T("mt_media_label") or "Media:") .. " " .. itemInfo)
+    end
+
+    -- === NERD TERMINAL TOGGLE (always visible; sequential mode only) ===
+    if multiTrackQueue.sequentialMode then
+        local nerdBtnW = PS(22)
+        local nerdBtnH = PS(18)
+        local nerdBtnX = PS(20)
+        local nerdBtnY = h - PS(44)
+        local nerdHover = mx >= nerdBtnX and mx <= nerdBtnX + nerdBtnW and my >= nerdBtnY and my <= nerdBtnY + nerdBtnH
+
+        if nerdHover then GUI.uiClickedThisFrame = true end
+
+        if multiTrackQueue.showTerminal then
+            gfx.set(0.3, 0.8, 0.3, 1)
+        else
+            gfx.set(0.4, 0.4, 0.4, nerdHover and 1 or 0.6)
+        end
+        gfx.rect(nerdBtnX, nerdBtnY, nerdBtnW, nerdBtnH, 1)
+        gfx.set(0, 0, 0, 1)
+        gfx.setfont(1, "Courier", PS(10), string.byte('b'))
+        gfx.x = nerdBtnX + PS(3)
+        gfx.y = nerdBtnY + PS(3)
+        gfx.drawstr(">_")
+
+        if nerdHover then
+            tooltipText = multiTrackQueue.showTerminal and (T("tooltip_nerd_mode_hide") or "Switch to Art View") or (T("tooltip_nerd_mode_show") or "Nerd Mode: Show terminal output")
+            tooltipX, tooltipY = mx + PS(10), my + PS(15)
+            if mouseDown and not multiTrackQueue.wasMouseDown then
+                multiTrackQueue.showTerminal = not multiTrackQueue.showTerminal
+            end
+        end
+
+        if multiTrackQueue.showTerminal then
+            local termX = PS(15)
+            local termY = PS(80)
+            local termW = w - PS(30)
+            local termH = h - termY - PS(60)
+            if termH > PS(60) then
+                gfx.set(0.02, 0.02, 0.03, 0.98)
+                gfx.rect(termX, termY, termW, termH, 1)
+                gfx.set(0.2, 0.8, 0.2, 0.5)
+                gfx.rect(termX, termY, termW, termH, 0)
+                gfx.set(0.2, 0.6, 0.2, 1)
+                gfx.rect(termX, termY, termW, PS(18), 1)
+                gfx.set(0, 0, 0, 1)
+                gfx.setfont(1, "Courier", PS(10), string.byte('b'))
+                gfx.x = termX + PS(5)
+                gfx.y = termY + PS(3)
+                gfx.drawstr(T("terminal_output_title") or "DEMUCS OUTPUT")
+
+                local termNow = os.clock()
+                if (termNow - (multiTrackQueue.lastTerminalUpdate or 0)) > 0.5 then
+                    multiTrackQueue.lastTerminalUpdate = termNow
+                    multiTrackQueue.terminalLines = {}
+                    local stdoutFile = activeJob and activeJob.stdoutFile or (multiTrackQueue.jobs[1] and multiTrackQueue.jobs[1].stdoutFile) or nil
+                    if stdoutFile then
+                        local f = io.open(stdoutFile, "r")
+                        if f then
+                            for line in f:lines() do
+                                table.insert(multiTrackQueue.terminalLines, line)
+                            end
+                            f:close()
+                        end
+                    end
+                end
+
+                local termContentY = termY + PS(22)
+                local termContentH = termH - PS(26)
+                local lineHeight = PS(12)
+                local maxLines = math.floor(termContentH / lineHeight)
+                local startLine = math.max(1, #(multiTrackQueue.terminalLines or {}) - maxLines + 1)
+                gfx.setfont(1, "Courier", PS(9))
+                local lineY = termContentY
+                for i = startLine, #(multiTrackQueue.terminalLines or {}) do
+                    if lineY < termY + termH - PS(5) then
+                        local line = multiTrackQueue.terminalLines[i] or ""
+                        if #line > 100 then line = line:sub(1, 97) .. ".." end
+                        if line:match("error") or line:match("Error") or line:match("ERROR") then
+                            gfx.set(1, 0.3, 0.3, 1)
+                        elseif line:match("warning") or line:match("Warning") then
+                            gfx.set(1, 0.8, 0.3, 1)
+                        elseif line:match("PROGRESS") then
+                            gfx.set(0.3, 0.8, 1, 1)
+                        else
+                            gfx.set(0.3, 0.9, 0.3, 0.9)
+                        end
+                        gfx.x = termX + PS(5)
+                        gfx.y = lineY
+                        gfx.drawstr(line)
+                        lineY = lineY + lineHeight
+                    end
+                end
+            end
+        end
     end
 
     -- Bottom line: Total elapsed, model, segment and cancel hint
@@ -12654,8 +14375,11 @@ local function drawMultiTrackProgressWindow()
     if multiTrackQueue.forceSequentialReason and multiTrackQueue.forceSequentialReason ~= "" then
         modeSuffix = " (forced: " .. tostring(multiTrackQueue.forceSequentialReason) .. ")"
     end
-    gfx.drawstr(string.format("Time: %d:%02d | %s | Seg:%s | %s%s | ESC=cancel",
-        totalMins, totalSecs, SETTINGS.model or "?", segSize, modeStr, modeSuffix))
+    local mtTime = T("mt_time") or "Time"
+    local mtSeg = T("mt_seg") or "Seg"
+    local mtCancel = T("mt_cancel") or "ESC=cancel"
+    gfx.drawstr(string.format("%s: %d:%02d | %s | %s:%s | %s%s | %s",
+        tostring(mtTime), totalMins, totalSecs, SETTINGS.model or "?", tostring(mtSeg), segSize, modeStr, modeSuffix, tostring(mtCancel)))
 
     -- flarkAUDIO logo at top (translucent) - "flark" regular, "AUDIO" bold
     gfx.setfont(1, "Arial", PS(10))
@@ -12681,42 +14405,22 @@ local function drawMultiTrackProgressWindow()
     if tooltipText then
         gfx.setfont(1, "Arial", PS(11))
         local padding = PS(8)
-        local ttW = gfx.measurestr(tooltipText) + padding * 2
-        local ttH = PS(18) + padding * 2
-        local ttX = math.min(tooltipX, w - ttW - PS(5))
-        local ttY = math.min(tooltipY, h - ttH - PS(5))
-
-        -- Background (theme-aware)
-        gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 0.98)
-        gfx.rect(ttX, ttY, ttW, ttH, 1)
-
-        -- Colored top border (STEM colors gradient)
-        for i = 0, ttW - 1 do
-            local colorIdx = math.floor(i / ttW * 4) + 1
-            colorIdx = math.min(4, math.max(1, colorIdx))
-            local c = STEM_BORDER_COLORS[colorIdx]
-            gfx.set(c[1]/255, c[2]/255, c[3]/255, 0.9)
-            gfx.line(ttX + i, ttY, ttX + i, ttY + 2)
-        end
-
-        -- Border (theme-aware)
-        gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
-        gfx.rect(ttX, ttY, ttW, ttH, 0)
-
-        -- Text (theme-aware)
-        gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
-        gfx.x = ttX + padding
-        gfx.y = ttY + padding + PS(2)
-        gfx.drawstr(tooltipText)
+        local lineH = PS(14)
+        local maxTextW = math.min(w * 0.62, PS(520))
+        drawTooltipStyled(tooltipText, tooltipX, tooltipY, w, h, padding, lineH, maxTextW)
     end
 
     -- Track mouse state for next frame
     multiTrackQueue.wasMouseDown = mouseDown
+    multiTrackQueue.wasRightMouseDown = rightMouseDown
 
     gfx.update()
 
-    -- Check for cancel
+    -- Allow new art via click/space (anywhere that isn't UI)
     local char = gfx.getchar()
+    handleArtAdvance(multiTrackQueue, mouseDown, char)
+
+    -- Check for cancel
     if char == -1 or char == 27 then
         return "cancel"
     end
@@ -12725,7 +14429,7 @@ local function drawMultiTrackProgressWindow()
 end
 
 -- Multi-track progress window loop
-local function multiTrackProgressLoop()
+function multiTrackProgressLoop()
     -- Update all job progress
     updateAllJobsProgress()
 
@@ -12743,7 +14447,7 @@ local function multiTrackProgressLoop()
         -- Best-effort kill of all running workers so cancel is immediate and doesn't slow next run
         if multiTrackQueue.jobs then
             for _, job in ipairs(multiTrackQueue.jobs) do
-                killWindowsProcessFromPidFile(job.pidFile)
+                killProcessFromPidFile(job.pidFile)
             end
         end
 
@@ -12803,6 +14507,7 @@ processAllStemsResult = function()
     -- Handle mute/delete options FIRST (before creating stems)
     local actionMsg = ""
     local actionCount = 0
+    local actionData = nil
 
     -- Collect all source items from all jobs
     local allItems = {}
@@ -12831,8 +14536,9 @@ processAllStemsResult = function()
                 actionCount = actionCount + 1
             end
         end
-        local itemWord = actionCount == 1 and "item" or "items"
-        actionMsg = "\n" .. actionCount .. " " .. itemWord .. " muted."
+        local itemWord = actionCount == 1 and (T("footer_item") or "item") or (T("footer_items") or "items")
+        actionMsg = "\n" .. string.format(T("result_action_muted") or "%d %s muted.", actionCount, itemWord)
+        actionData = { kind = "items", key = "result_action_muted", count = actionCount }
     elseif SETTINGS.muteSelection and not skipSelectionProcessing then
         -- Mute selection portion of all source items
         -- Process in reverse order to avoid item index shifting issues
@@ -12878,8 +14584,9 @@ processAllStemsResult = function()
                 end
             end
         end
-        local itemWord = actionCount == 1 and "item" or "items"
-        actionMsg = "\nSelection muted in " .. actionCount .. " " .. itemWord .. "."
+        local itemWord = actionCount == 1 and (T("footer_item") or "item") or (T("footer_items") or "items")
+        actionMsg = "\n" .. string.format(T("result_action_selection_muted") or "Selection muted in %d %s.", actionCount, itemWord)
+        actionData = { kind = "items", key = "result_action_selection_muted", count = actionCount }
     elseif SETTINGS.deleteOriginal then
         -- Delete all source items from all jobs
         -- Process in reverse order to avoid index shifting issues
@@ -12893,8 +14600,9 @@ processAllStemsResult = function()
                 end
             end
         end
-        local itemWord = actionCount == 1 and "item" or "items"
-        actionMsg = "\n" .. actionCount .. " " .. itemWord .. " deleted."
+        local itemWord = actionCount == 1 and (T("footer_item") or "item") or (T("footer_items") or "items")
+        actionMsg = "\n" .. string.format(T("result_action_deleted") or "%d %s deleted.", actionCount, itemWord)
+        actionData = { kind = "items", key = "result_action_deleted", count = actionCount }
     elseif SETTINGS.deleteSelection and not skipSelectionProcessing then
         -- Delete selection portion of all source items
         -- Process in reverse order to avoid item index shifting issues
@@ -12942,12 +14650,14 @@ processAllStemsResult = function()
                 end
             end
         end
-        local itemWord = actionCount == 1 and "item" or "items"
-        actionMsg = "\nSelection deleted from " .. actionCount .. " " .. itemWord .. "."
+        local itemWord = actionCount == 1 and (T("footer_item") or "item") or (T("footer_items") or "items")
+        actionMsg = "\n" .. string.format(T("result_action_selection_deleted") or "Selection deleted from %d %s.", actionCount, itemWord)
+        actionData = { kind = "items", key = "result_action_selection_deleted", count = actionCount }
     end
 
     -- Now create stems for each job
     local totalStemsCreated = 0
+    local sourceTracksWithStems = {} -- track ptr -> true (only count tracks that actually received stems)
     local trackNames = {}
 
     debugLog("=== processAllStemsResult: Creating stem tracks ===")
@@ -12956,6 +14666,14 @@ processAllStemsResult = function()
     debugLog("createNewTracks: " .. tostring(SETTINGS.createNewTracks))
 
     local is6Stem = (SETTINGS.model == "htdemucs_6s")
+
+    -- Use a stable selection range for item placement (avoid any stale globals).
+    local globalSelPos = itemPos
+    local globalSelLen = itemLen
+    if timeSelectionMode and timeSelectionStart and timeSelectionEnd and timeSelectionEnd > timeSelectionStart then
+        globalSelPos = timeSelectionStart
+        globalSelLen = timeSelectionEnd - timeSelectionStart
+    end
 
     for jobIdx, job in ipairs(multiTrackQueue.jobs) do
         debugLog("Job " .. jobIdx .. ": trackDir=" .. tostring(job.trackDir))
@@ -12986,13 +14704,27 @@ processAllStemsResult = function()
         if next(stems) then
             if SETTINGS.createNewTracks then
                 -- New tracks mode: create separate tracks for each stem
-                debugLog("  Calling createStemTracksForSelection...")
-                local count = createStemTracksForSelection(stems, itemPos, itemLen, job.track)
+                -- Use per-job selection range: if time selection exists, use it; otherwise use the job's source item position/length
+                local jobSelPos = globalSelPos
+                local jobSelLen = globalSelLen
+                if not timeSelectionMode and job.sourceItem and reaper.ValidatePtr(job.sourceItem, "MediaItem*") then
+                    -- No time selection: use the source item's position/length for this job
+                    jobSelPos = reaper.GetMediaItemInfo_Value(job.sourceItem, "D_POSITION")
+                    jobSelLen = reaper.GetMediaItemInfo_Value(job.sourceItem, "D_LENGTH")
+                    debugLog("  No time selection: using source item pos=" .. jobSelPos .. ", len=" .. jobSelLen)
+                elseif timeSelectionMode then
+                    debugLog("  Time selection mode: using global sel pos=" .. jobSelPos .. ", len=" .. jobSelLen)
+                end
+                debugLog("  Calling createStemTracksForSelection..")
+                local count = createStemTracksForSelection(stems, jobSelPos, jobSelLen, job.track)
                 debugLog("  Created " .. count .. " stem tracks")
                 totalStemsCreated = totalStemsCreated + count
+                if count > 0 and job.track and reaper.ValidatePtr(job.track, "MediaTrack*") then
+                    sourceTracksWithStems[job.track] = true
+                end
             else
                 -- In-place mode: replace source item with stems as takes
-                debugLog("  In-place mode: processing source item...")
+                debugLog("  In-place mode: processing source item..")
                 local sourceItem = job.sourceItem
                 if sourceItem and reaper.ValidatePtr(sourceItem, "MediaItem*") then
                     -- Bij time selection: split het item eerst bij de selectie grenzen
@@ -13052,7 +14784,58 @@ processAllStemsResult = function()
             debugLog("  No stems found, skipping")
         end
     end
+    local sourceTrackCountWithStems = 0
+    for _ in pairs(sourceTracksWithStems) do sourceTrackCountWithStems = sourceTrackCountWithStems + 1 end
     debugLog("Total stems created: " .. totalStemsCreated)
+
+    -- If nothing was created, surface the Python log instead of silently returning to main().
+    -- Also undo any mute/delete actions that may have been applied earlier in this function.
+    if totalStemsCreated == 0 then
+        local function readFileSnippet(path, maxChars)
+            maxChars = maxChars or 1200
+            if not path or path == "" then return nil end
+            local f = io.open(path, "r")
+            if not f then return nil end
+            local content = f:read("*a") or ""
+            f:close()
+            if content == "" then return nil end
+            if #content > maxChars then
+                content = content:sub(1, maxChars) .. "\n...(truncated)..."
+            end
+            return content
+        end
+
+        -- Use the first job's log as the primary error (usually enough).
+        local firstJob = multiTrackQueue.jobs and multiTrackQueue.jobs[1] or nil
+        local logPath = firstJob and firstJob.logFile or nil
+        local logSnippet = readFileSnippet(logPath, 1400) or "(no log output found)"
+
+        local msg = "No stems were created.\n\n"
+            .. "This usually means the Python separator failed to start or crashed.\n\n"
+            .. "Python log (" .. tostring(logPath or "unknown") .. "):\n"
+            .. logSnippet
+
+        -- Friendly hint for the most common missing dependency.
+        if logSnippet:find("No module named 'onnxruntime'", 1, true) then
+            msg = msg
+                .. "\n\nFix:\n"
+                .. "Install onnxruntime into the Python venv that REAPER is using:\n"
+                .. tostring(PYTHON_PATH) .. " -m pip install onnxruntime\n\n"
+                .. "If pip refuses (no wheels for your Python version), recreate the venv with Python 3.11/3.12 and reinstall dependencies."
+        end
+
+        -- Close and undo the block to revert any pre-stem actions (mute/delete).
+        reaper.Undo_EndBlock("STEMwerk: Separation failed (no stems created)", -1)
+        if reaper.Undo_DoUndo2 then
+            reaper.Undo_DoUndo2(0)
+        end
+        reaper.UpdateArrange()
+
+        multiTrackQueue.active = false
+        isProcessingActive = false
+        showMessage("Separation Failed", msg, "error", true)
+        return
+    end
 
     -- Handle deleteOriginalTrack AFTER stems are created (deletes entire source tracks)
     if SETTINGS.deleteOriginalTrack then
@@ -13071,19 +14854,21 @@ processAllStemsResult = function()
             end
         end
         -- Delete tracks in reverse order (higher indices first)
+        local trackDeleteCount = 0
         for i = #tracksToDelete, 1, -1 do
             local track = tracksToDelete[i]
             if reaper.ValidatePtr(track, "MediaTrack*") then
                 reaper.DeleteTrack(track)
-                actionCount = actionCount + 1
+                trackDeleteCount = trackDeleteCount + 1
             end
         end
-        local trackWord = actionCount == 1 and "track" or "tracks"
-        actionMsg = "\n" .. actionCount .. " source " .. trackWord .. " deleted."
+        if trackDeleteCount > 0 then
+            actionData = { kind = "tracks", key = "result_action_tracks_deleted", count = trackDeleteCount }
+        end
     end
 
     reaper.Undo_EndBlock("STEMwerk: Multi-track stem separation", -1)
-    reaper.UpdateArrange()
+    adjustTrackLayout()
 
     -- Calculate total processing time
     local totalTime = os.time() - (multiTrackQueue.globalStartTime or os.time())
@@ -13102,7 +14887,7 @@ processAllStemsResult = function()
     -- Log benchmark result
     local modeStr = multiTrackQueue.sequentialMode and "Sequential" or "Parallel"
     local segSize = multiTrackQueue.sequentialMode and "40" or "25"
-    local benchmarkLog = os.getenv("TEMP") .. "\\STEMwerk_benchmark.txt"
+    local benchmarkLog = getTempDir() .. PATH_SEP .. "STEMwerk_benchmark.txt"
     local bf = io.open(benchmarkLog, "a")
     if bf then
         bf:write(string.format("\n=== Benchmark Result ===\n"))
@@ -13131,16 +14916,28 @@ processAllStemsResult = function()
 
     local timeStr = string.format("%d:%02d", totalMins, totalSecs)
     local speedStr = string.format("%.2fx", realtimeFactor)
-    local resultMsg
+    local resultData
     if SETTINGS.createNewTracks then
-        local trackWord = totalStemsCreated == 1 and "track" or "tracks"
-        resultMsg = string.format("%d stem %s created from %d source tracks.\nTime: %s | Speed: %s realtime | Mode: %s%s",
-            totalStemsCreated, trackWord, #multiTrackQueue.jobs, timeStr, speedStr, modeStr, actionMsg)
+        local srcCount = sourceTrackCountWithStems > 0 and sourceTrackCountWithStems or #multiTrackQueue.jobs
+        resultData = {
+            kind = "multi_new_tracks",
+            stemsCreated = totalStemsCreated,
+            sourceCount = srcCount,
+            totalTimeSec = totalTime,
+            realtimeFactor = realtimeFactor,
+            sequentialMode = multiTrackQueue.sequentialMode and true or false,
+        }
     else
-        local itemWord = #multiTrackQueue.jobs == 1 and "item" or "items"
-        resultMsg = string.format("%d %s replaced with stems as takes.\nTime: %s | Speed: %s realtime | Mode: %s%s",
-            #multiTrackQueue.jobs, itemWord, timeStr, speedStr, modeStr, actionMsg)
+        local itemCount = #multiTrackQueue.jobs
+        resultData = {
+            kind = "multi_in_place",
+            itemCount = itemCount,
+            totalTimeSec = totalTime,
+            realtimeFactor = realtimeFactor,
+            sequentialMode = multiTrackQueue.sequentialMode and true or false,
+        }
     end
+    resultData.action = actionData
 
     -- Before clearing time selection, ensure playhead/cursor is at selection start
     if timeSelectionMode and timeSelectionStart and timeSelectionEnd then
@@ -13163,7 +14960,7 @@ processAllStemsResult = function()
     -- Reset processing guard
     isProcessingActive = false
 
-    showResultWindow(selectedStemData, resultMsg)
+    showResultWindow(selectedStemData, resultData)
 end
 
 -- Separation workflow
@@ -13175,6 +14972,19 @@ function runSeparationWorkflow()
     end
     isProcessingActive = true
     debugLog("=== runSeparationWorkflow started ===")
+
+    -- Guard: don't run if user selected 0 stems (it would produce no outputs and confuse users).
+    local selectedStemCount = 0
+    for _, stem in ipairs(STEMS) do
+        if stem.selected and (not stem.sixStemOnly or SETTINGS.model == "htdemucs_6s") then
+            selectedStemCount = selectedStemCount + 1
+        end
+    end
+    if selectedStemCount <= 0 then
+        showMessage(T("no_stems_selected") or "No Stems Selected", T("please_select_stem") or "Please select at least one stem.", "warning")
+        isProcessingActive = false
+        return
+    end
 
     -- Save playback state to restore after processing
     savedPlaybackState = reaper.GetPlayState()
@@ -13197,7 +15007,7 @@ function runSeparationWorkflow()
                 reaper.SetMediaItemSelected(item, true)
             end
         end
-        reaper.UpdateArrange()
+    adjustTrackLayout()
         selectedItem = reaper.GetSelectedMediaItem(0, 0)
         debugLog("After auto-select, selected item: " .. tostring(selectedItem))
     end
@@ -13248,7 +15058,7 @@ function runSeparationWorkflow()
 
     local extracted, err, sourceItem, trackList, trackItems
     if timeSelectionMode then
-        debugLog("Rendering time selection to WAV...")
+        debugLog("Rendering time selection to WAV..")
         extracted, err, sourceItem, trackList, trackItems = renderTimeSelectionToWav(workflowTempInput)
         debugLog("Render result: extracted=" .. tostring(extracted) .. ", err=" .. tostring(err))
 
@@ -13367,7 +15177,7 @@ function runSeparationWorkflow()
         return
     end
 
-    debugLog("Extraction successful, starting separation...")
+    debugLog("Extraction successful, starting separation..")
     debugLog("Model: " .. SETTINGS.model)
     -- Start separation with progress UI (async)
     runSeparationWithProgress(workflowTempInput, workflowTempDir, SETTINGS.model)
@@ -13375,7 +15185,7 @@ function runSeparationWorkflow()
 end
 
 -- Check for quick preset mode (called from toolbar scripts)
-local function checkQuickPreset()
+function checkQuickPreset()
     local quickRun = reaper.GetExtState(EXT_SECTION, "quick_run")
     if quickRun == "1" then
         -- Clear the flag
@@ -13408,6 +15218,7 @@ end
 -- Main
 main = function()
     debugLog("=== main() called ===")
+    perfMark("main() enter")
 
     -- If a toolbar preset requested an immediate run, bypass the focus-only guard.
     local quickRunRequested = (reaper and reaper.GetExtState and reaper.GetExtState(EXT_SECTION, "quick_run") == "1")
@@ -13429,6 +15240,7 @@ main = function()
 
     -- Load settings first (needed for window position in error messages)
     loadSettings()
+    perfMark("loadSettings() done")
 
     selectedItem = reaper.GetSelectedMediaItem(0, 0)
     timeSelectionMode = false
@@ -13477,8 +15289,10 @@ main = function()
         reaper.defer(runSeparationWorkflow)
     else
         -- Normal mode: show dialog
+        perfMark("showStemSelectionDialog() about to run")
         showStemSelectionDialog()
     end
 end
 
 main()
+

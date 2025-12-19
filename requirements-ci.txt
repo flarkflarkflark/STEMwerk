@@ -1,3 +1,4 @@
 audio-separator[cpu]
+onnxruntime
 soundfile
 pytest
