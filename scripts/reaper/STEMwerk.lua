@@ -9050,6 +9050,17 @@ function drawMainDialogModalOverlay()
     local char = gfx.getchar()
     GUI.uiClickedThisFrame = true
 
+    -- Keep the "cool background FX" alive even while the modal is open (dialogLoop() returns early).
+    -- Draw a subtle procedural-art layer behind the dim overlay.
+    if proceduralArt and proceduralArt.seed == 0 then
+        generateNewArt()
+    end
+    if proceduralArt then
+        proceduralArt.time = (proceduralArt.time or 0) + 0.016
+        -- Subtle: low alpha, and include background so it doesn't look like an empty black screen.
+        drawProceduralArtInternal(0, 0, gfx.w, gfx.h, proceduralArt.time, (mainDialogArt and mainDialogArt.rotation) or 0, false, 0.22)
+    end
+
     -- Dim background
     gfx.set(0, 0, 0, 0.55 * fade)
     gfx.rect(0, 0, gfx.w, gfx.h, 1)
@@ -9087,6 +9098,8 @@ function drawMainDialogModalOverlay()
     -- Rounded rect fill (scanline)
     local r = S(12)
     local function roundedFill(x, y, w, h, radius)
+        w = math.floor(w)
+        h = math.floor(h)
         radius = math.max(0, math.min(radius, math.floor(math.min(w, h) / 2)))
         for i = 0, h - 1 do
             local inset = 0
@@ -9100,13 +9113,15 @@ function drawMainDialogModalOverlay()
         end
     end
 
-    -- Panel bg
-    gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 0.98)
-    roundedFill(boxX, boxY, boxW, boxH, r)
+    -- Panel shadow
+    gfx.set(0, 0, 0, 0.35 * fade)
+    roundedFill(boxX + S(2), boxY + S(3), boxW, boxH, r)
 
-    -- Panel border (simple)
+    -- Panel border + bg (rounded, no square outline)
     gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 0.95)
-    gfx.rect(boxX, boxY, boxW, boxH, 0)
+    roundedFill(boxX, boxY, boxW, boxH, r)
+    gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], 0.985)
+    roundedFill(boxX + 1, boxY + 1, boxW - 2, boxH - 2, math.max(0, r - 1))
 
     -- Stem-color top bar (like tooltips)
     for i = 0, math.floor(boxW) - 1 do
@@ -9162,19 +9177,14 @@ function drawMainDialogModalOverlay()
     local btnY = boxY + boxH - btnH - pad
     local hover = mx >= btnX and mx <= btnX + btnW and my >= btnY and my <= btnY + btnH
     local col = hover and THEME.buttonPrimaryHover or THEME.buttonPrimary
+
+    -- Draw a proper pill border (no square rect): outer border pill then inner fill pill.
+    local br = math.floor(btnH / 2)
+    gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 0.95)
+    roundedFill(btnX, btnY, btnW, btnH, br)
     gfx.set(col[1], col[2], col[3], 1)
-    for i = 0, btnH - 1 do
-        local radius = btnH / 2
-        local inset = 0
-        if i < radius then
-            inset = radius - math.sqrt(radius * radius - (radius - i) * (radius - i))
-        elseif i > btnH - radius then
-            inset = radius - math.sqrt(radius * radius - (i - (btnH - radius)) * (i - (btnH - radius)))
-        end
-        gfx.line(btnX + inset, btnY + i, btnX + btnW - inset, btnY + i)
-    end
-    gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 0.9)
-    gfx.rect(btnX, btnY, btnW, btnH, 0)
+    roundedFill(btnX + 1, btnY + 1, btnW - 2, btnH - 2, math.max(0, br - 1))
+
     gfx.set(1, 1, 1, 1)
     gfx.setfont(1, "Arial", S(12), string.byte('b'))
     local okText = T("ok") or "OK"
