@@ -109,7 +109,9 @@ if ! "$APPIMAGETOOL_CMD" --version >/dev/null 2>&1; then
   fi
 fi
 
-"$APPIMAGETOOL_CMD" "$APPDIR" "STEMwerk-$VERSION-x86_64.AppImage"
+# appimagetool sometimes can't infer architecture from an AppDir; set it explicitly.
+: "${ARCH:=x86_64}"
+ARCH="$ARCH" "$APPIMAGETOOL_CMD" "$APPDIR" "STEMwerk-$VERSION-x86_64.AppImage"
 popd >/dev/null
 
 mv -f "$BUILD_DIR/STEMwerk-$VERSION-x86_64.AppImage" "$OUT_DIR/"
