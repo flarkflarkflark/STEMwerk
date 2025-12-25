@@ -2,21 +2,20 @@
 
 STEMwerk is a REAPER script that runs **Demucs-based stem separation** via a Python worker, with a REAPER-native UI, progress windows, debug logging, and **capability-driven device selection** (CPU / CUDA / ROCm / DirectML / MPS when available).
 
-
 ## Python interpreter: cross-platform & fallback
 
-STEMwerk zoekt automatisch naar een geschikte Python-interpreter. Voor maximale compatibiliteit op Windows, Linux en macOS:
+STEMwerk automatically looks for a suitable Python interpreter. For best compatibility on Windows, Linux, and macOS:
 
-1. **Aanbevolen:** Maak een virtuele omgeving aan in de repo-root:
+1. **Recommended:** Create a virtual environment in the repo root:
    - Windows: `.venv\Scripts\python.exe`
    - Linux/macOS: `.venv/bin/python3`
-2. **Stel het pad naar de interpreter expliciet in** via de STEMwerk UI of config (pythonPath override). Dit voorkomt dat een globale Python wordt gebruikt.
-3. **Fallback-volgorde:**
-   - Eerst: expliciet opgegeven pythonPath (config/ExtState)
-   - Dan: lokale .venv (platformspecifiek pad)
-   - Daarna: `python3` of `python` in het systeem-PATH
+2. **Set the interpreter path explicitly** via the STEMwerk UI or config (pythonPath override). This avoids using a global Python by accident.
+3. **Fallback order:**
+   - First: user-configured pythonPath (config/ExtState)
+   - Then: local .venv (platform-specific path)
+   - Finally: `python3` or `python` on the system PATH
 
-**Voorbeeld detectielogica:**
+**Example detection logic:**
 ```lua
 if user_configured_python then
   use(user_configured_python)
@@ -29,8 +28,8 @@ end
 use("python3")
 ```
 
-**Let op:**
-Zorg dat alle benodigde Python-pakketten in de gekozen omgeving zijn geïnstalleerd. Zie ook de sectie hieronder voor installatie-instructies.
+**Note:**
+Make sure all required Python packages are installed in the selected environment. See the install section below.
 
 ## Install / update in REAPER
 
@@ -77,4 +76,3 @@ Logs:
 ## Benchmarks
 Benchmark notes live here:
 - `tests/bench_results/README.md`
-

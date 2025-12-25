@@ -11,6 +11,7 @@ This file is intentionally tracked in git so "what's next" survives VS Code / Co
 - [x] Sanity-check Python path auto-detect
 - [ ] Re-test REAPER UI scaling/status
 - [x] Confirm DirectML/device options docs
+- [ ] Help: add "Reaper" menu entry with a page for temp files + settings
 
 - [ ] REAPER progress/complete UI polish
 	- [x] Progress: model badge aligned with progress bar (no overflow)
