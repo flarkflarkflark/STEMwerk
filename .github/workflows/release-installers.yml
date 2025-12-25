@@ -135,6 +135,11 @@ jobs:
         run: |
           bash installer/linux/build_appimage.sh
 
+      - name: Build Arch package
+        shell: bash
+        run: |
+          bash installer/linux/build_archpkg.sh
+
       - name: Upload release assets (Linux)
         uses: softprops/action-gh-release@v2
         with:
@@ -143,5 +148,5 @@ jobs:
             installer/linux/dist/*.deb
             installer/linux/dist/*.rpm
             installer/linux/dist/*.AppImage
-
+            installer/linux/dist/*.pkg.tar.zst
 

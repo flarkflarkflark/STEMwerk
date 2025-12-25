@@ -85,6 +85,7 @@ jobs:
           bash installer/linux/build_deb.sh
           bash installer/linux/build_rpm.sh
           bash installer/linux/build_appimage.sh
+          bash installer/linux/build_archpkg.sh
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -96,6 +97,7 @@ jobs:
             installer/linux/dist/*.deb
             installer/linux/dist/*.rpm
             installer/linux/dist/*.AppImage
+            installer/linux/dist/*.pkg.tar.zst
           if-no-files-found: error
 
   release:
