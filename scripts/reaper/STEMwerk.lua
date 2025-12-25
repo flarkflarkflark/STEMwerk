@@ -10989,6 +10989,61 @@ local function suppressStderr()
     return OS == "Windows" and " 2>nul" or " 2>/dev/null"
 end
 
+-- Cleanup temp working files (keep output stems)
+local function normalizePath(p)
+    if not p then return "" end
+    local norm = tostring(p)
+    if OS == "Windows" then
+        norm = norm:gsub("/", "\\")
+        norm = norm:lower()
+    else
+        norm = norm:gsub("\\", "/")
+    end
+    return norm
+end
+
+local function isSafeTempDir(path)
+    if not path or path == "" then return false end
+    local base = normalizePath(getTempDir())
+    local p = normalizePath(path)
+    if base ~= "" and p:sub(1, #base) ~= base then return false end
+    if not p:find("stemwerk", 1, true) then return false end
+    return true
+end
+
+local function cleanupTempWorkDir(dir)
+    if not dir or dir == "" then return end
+    if not isSafeTempDir(dir) then
+        debugLog("cleanupTempWorkDir: skip unsafe path " .. tostring(dir))
+        return
+    end
+
+    if not (reaper and reaper.EnumerateFiles) then
+        local known = {"input.wav", "stdout.txt", "separation_log.txt", "done.txt", "pid.txt"}
+        for _, name in ipairs(known) do
+            os.remove(dir .. PATH_SEP .. name)
+        end
+        os.remove(dir .. PATH_SEP .. "input.wav.ffmpeg.log")
+        return
+    end
+
+    local idx = 0
+    while true do
+        local f = reaper.EnumerateFiles(dir, idx)
+        if not f then break end
+        local lower = tostring(f):lower()
+        local full = dir .. PATH_SEP .. f
+        if lower == "input.wav" then
+            os.remove(full)
+        elseif lower:match("%.wav$") then
+            -- Keep outputs (stems)
+        else
+            os.remove(full)
+        end
+        idx = idx + 1
+    end
+end
+
 -- File size helper (bytes). Returns -1 on failure.
 local function fileSizeBytes(p)
     if not p then return -1 end
@@ -12897,6 +12952,7 @@ local function finishSeparationCallback()
             -- Success - process stems
             isProcessingActive = false  -- Reset guard so workflow can be restarted after result
             processStemsResult(stems)
+            cleanupTempWorkDir(progressState.outputDir)
         elseif checkCount < 10 then
             -- Retry
             reaper.defer(checkFiles)
@@ -16129,6 +16185,15 @@ processAllStemsResult = function()
         }
     end
     resultData.action = actionData
+
+    -- Cleanup temp working files (keep stem WAVs for REAPER references).
+    if multiTrackQueue.jobs then
+        for _, job in ipairs(multiTrackQueue.jobs) do
+            if job.trackDir then
+                cleanupTempWorkDir(job.trackDir)
+            end
+        end
+    end
 
     -- Before clearing time selection, ensure playhead/cursor is at selection start
     if timeSelectionMode and timeSelectionStart and timeSelectionEnd then
