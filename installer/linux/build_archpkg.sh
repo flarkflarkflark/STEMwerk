@@ -44,7 +44,7 @@ docker run --rm \
   -v "$WORK_DIR:/work" \
   -w /work \
   archlinux:latest \
-  bash -lc "pacman -Sy --noconfirm --needed base-devel zstd; export MAKEPKG_ALLOW_ROOT=1; makepkg --noconfirm --nosign"
+  bash -lc "pacman -Sy --noconfirm --needed base-devel zstd; useradd -m builder; chown -R builder:builder /work; su builder -c 'cd /work && makepkg --noconfirm --nosign'"
 
 # Copy output package
 dist_pkg="$(ls -1 "$WORK_DIR"/*.pkg.tar.zst | head -n 1)"
