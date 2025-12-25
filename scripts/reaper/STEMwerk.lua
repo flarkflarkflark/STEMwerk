@@ -12470,22 +12470,35 @@ local function drawProgressWindow()
     progressState.wasMouseDown = mouseDown
     progressState.wasRightMouseDown = rightMouseDown
 
-    -- Cancel hint (below art/terminal)
+    -- Bottom ETA + cancel hint (styled like main status bar)
     local bottomEta = nil
     local stageStr = progressState.stage or ""
     bottomEta = stageStr:match("ETA%s+([%d]+:%s*%d+)")
     if bottomEta then bottomEta = bottomEta:gsub("%s+", "") end
-    gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 1)
-    gfx.setfont(1, "Arial", PS(9))
     local hintText = T("hint_cancel")
     if bottomEta and bottomEta ~= "" then
         local etaLabel = T("eta_label") or "ETA:"
         hintText = tostring(etaLabel) .. " " .. tostring(bottomEta) .. " | " .. tostring(hintText)
     end
-    local hintW = gfx.measurestr(hintText)
-    gfx.x = (w - hintW) / 2
-    gfx.y = h - PS(20)
-    gfx.drawstr(hintText)
+    local statusFontSize = PS(9)
+    local statusPadX = PS(10)
+    local statusBlockPadY = PS(2)
+    local statusBlockAlpha = 0.55
+    local statusBlockBorderAlpha = 0.6
+    gfx.setfont(1, "Arial", statusFontSize)
+    local statusLineH = gfx.texth
+    local statusBlockH = statusLineH + statusBlockPadY * 2
+    local statusBlockY = h - statusBlockH
+    gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], statusBlockAlpha)
+    gfx.rect(0, statusBlockY, w, statusBlockH, 1)
+    gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], statusBlockBorderAlpha)
+    gfx.rect(0, statusBlockY, w, statusBlockH, 0)
+    gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+    local availableW = w - statusPadX * 2
+    local labelText, tw = fitTextToBox(hintText, availableW, statusFontSize, statusFontSize)
+    gfx.x = statusPadX + (availableW - tw) / 2
+    gfx.y = statusBlockY + statusBlockPadY
+    gfx.drawstr(labelText)
 
     -- flarkAUDIO logo at top (translucent) - "flark" regular, "AUDIO" bold
     gfx.setfont(1, "Arial", PS(10))
@@ -15521,10 +15534,15 @@ function drawMultiTrackProgressWindow()
     -- Bottom line: Total elapsed, model, segment and cancel hint
     local totalMins = math.floor(globalElapsed / 60)
     local totalSecs = globalElapsed % 60
-    gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 1)
-    gfx.setfont(1, "Arial", PS(10))
-    gfx.x = PS(20)
-    gfx.y = h - PS(20)
+    local statusFontSize = PS(9)
+    local statusPadX = PS(10)
+    local statusBlockPadY = PS(2)
+    local statusBlockAlpha = 0.55
+    local statusBlockBorderAlpha = 0.6
+    gfx.setfont(1, "Arial", statusFontSize)
+    local statusLineH = gfx.texth
+    local statusBlockH = statusLineH + statusBlockPadY * 2
+    local statusBlockY = h - statusBlockH
     local segSize = multiTrackQueue.sequentialMode and "40" or "25"
     local modeStr = multiTrackQueue.sequentialMode and "Seq" or "Par"
     local modeSuffix = ""
@@ -15541,8 +15559,18 @@ function drawMultiTrackProgressWindow()
         local etaLabel = T("eta_label") or "ETA:"
         etaText = string.format(" | %s %d:%02d", tostring(etaLabel), etaMins, etaSecs)
     end
-    gfx.drawstr(string.format("%s: %d:%02d%s | %s | %s:%s | %s%s | %s",
-        tostring(mtTime), totalMins, totalSecs, etaText, SETTINGS.model or "?", tostring(mtSeg), segSize, modeStr, modeSuffix, tostring(mtCancel)))
+    local statusText = string.format("%s: %d:%02d%s | %s | %s:%s | %s%s | %s",
+        tostring(mtTime), totalMins, totalSecs, etaText, SETTINGS.model or "?", tostring(mtSeg), segSize, modeStr, modeSuffix, tostring(mtCancel))
+    gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], statusBlockAlpha)
+    gfx.rect(0, statusBlockY, gfx.w, statusBlockH, 1)
+    gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], statusBlockBorderAlpha)
+    gfx.rect(0, statusBlockY, gfx.w, statusBlockH, 0)
+    gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+    local availableW = gfx.w - statusPadX * 2
+    local labelText, tw = fitTextToBox(statusText, availableW, statusFontSize, statusFontSize)
+    gfx.x = statusPadX + (availableW - tw) / 2
+    gfx.y = statusBlockY + statusBlockPadY
+    gfx.drawstr(labelText)
 
     -- flarkAUDIO logo at top (translucent) - "flark" regular, "AUDIO" bold
     gfx.setfont(1, "Arial", PS(10))
