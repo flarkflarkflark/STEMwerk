@@ -4,6 +4,7 @@ This file is intentionally tracked in git so "what's next" survives VS Code / Co
 
 ## Current
 
+- [ ] Processing window: investigate start delay (show immediately)
 - [x] Run pytest + i18n checks
 - [x] Verify CI workflow passes (replicated locally)
 - [x] Align Lua @version with APP_VERSION
