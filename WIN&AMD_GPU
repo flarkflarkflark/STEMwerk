@@ -1,0 +1,48 @@
+WIN & AMD GPU NOTES
+
+Summary
+- AMD GPUs on Windows use DirectML (not ROCm). CUDA checks are only for NVIDIA.
+- Use a dedicated virtual environment (recommended: .venv-gpu) and point STEMwerk to it via ExtState pythonPath.
+
+Known Pain Points / Fixes
+1) Wrong Python env inside REAPER
+   - Symptom: GPU not detected, CPU-only torch, missing deps.
+   - Fix: Set ExtState key STEMwerk/pythonPath to the venv python.exe.
+
+2) DirectML packages partially installed
+   - Symptom: "DmlExecutionProvider not available" in separation_log.txt.
+   - Fix: reinstall ORT-DML clean:
+     - pip uninstall -y onnxruntime onnxruntime-gpu onnxruntime-directml
+     - pip install --force-reinstall --no-cache-dir onnxruntime-directml==1.23.0
+     - Verify: python -c "import onnxruntime as ort; print(ort.get_available_providers())"
+       Expect: DmlExecutionProvider present.
+
+3) NumPy/Numba mismatch after ORT-DML install
+   - Symptom: "Numba needs NumPy 2.3 or less" crash.
+   - Fix: pip install --force-reinstall --no-cache-dir numpy==2.3.5
+
+4) torch-directml setup
+   - Recommended: torch-directml 0.2.5.dev240914 + torch 2.4.1
+   - Install: pip install --pre torch-directml --extra-index-url https://download.pytorch.org/whl/nightly/directml
+
+5) GPU selection (multiple AMD GPUs)
+   - Use Device: DirectML 0/1 in UI.
+   - We force device selection in audio_separator_process.py; logs show:
+     "STEMWERK: Forced DirectML device index X".
+
+6) No GPU load visible in Task Manager
+   - Switch GPU graph to "Compute_0/1" (not Copy).
+   - Some ops can still fall back to CPU (known in torch-directml).
+
+Diagnostics
+- %TEMP%\STEMwerk_*\separation_log.txt (per run)
+- %TEMP%\STEMwerk_*\stdout.txt (progress)
+- Enable debug log: set STEMWERK_DEBUG=1 before launching REAPER
+
+Quick checks (in venv)
+- python scripts\reaper\audio_separator_process.py --check
+- python scripts\reaper\audio_separator_process.py --list-devices
+
+Notes
+- AMD driver should be up to date (Adrenalin / WDDM 2.9+).
+- iGPU uses shared memory; VRAM may appear small in Windows AdapterRAM.

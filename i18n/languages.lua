@@ -77,6 +77,8 @@ local LANGUAGES = {
         cancelled = "Cancelled",
         timeout = "Timeout",
         elapsed = "Elapsed:",
+        progress_label = "Progress",
+        processing_label = "Processing",
 
         -- Tooltips
         switch_dark = "Switch to dark mode",
@@ -157,11 +159,16 @@ local LANGUAGES = {
         eta_label = "ETA:",
         seg_label = "Seg:",
         device_tooltip_prefix = "Device:",
+        backend_label = "Backend",
+        best_device_label = "Best device",
+        chosen_device_label = "Chosen device",
         terminal_output_title = "DEMUCS OUTPUT",
         terminal_hint_return_to_art = "Click >_ to return to art",
         complete_hint_keys = "Enter / ESC",
         complete_target_prefix = "Target:",
         complete_ok_tooltip = "Close (Enter / ESC)",
+        single_track = "Single-Track",
+        multi_track = "Multi-Track",
 
         -- Device tooltips
         device_auto_desc = "Auto-select best available backend (CUDA/DirectML/MPS/CPU).",
@@ -173,7 +180,9 @@ local LANGUAGES = {
         device_note_linux_cuda_build = "Your Python environment is using a CUDA PyTorch build (e.g. +cuXXX) but CUDA is not available. For AMD GPUs on Linux you typically need a ROCm-enabled PyTorch build (torch.version.hip set).",
         device_note_cuda_unavailable = "CUDA backend not available (torch.cuda.is_available() is false).",
         device_note_mps_unavailable = "Apple MPS backend not available.",
-        device_note_probe_failed = "Device probe failed; showing safe options (Auto/CPU).",
+        device_note_probe_failed = "Device probe not completed; showing safe options (Auto/CPU).",
+        device_note_probe_completed = "Device probe completed; showing available options.",
+        device_note_no_gpu = "Device probe completed; no GPU backends detected; showing safe options (Auto/CPU).",
         device_note_probing = "Detecting available devices… (this can take a moment the first time)",
 
         -- Quick settings menu
@@ -376,6 +385,8 @@ local LANGUAGES = {
         cancelled = "Geannuleerd",
         timeout = "Time-out",
         elapsed = "Verstreken:",
+        progress_label = "Voortgang",
+        processing_label = "Verwerken",
 
         -- Tooltips
         switch_dark = "Schakel naar donkere modus",
@@ -456,11 +467,16 @@ local LANGUAGES = {
         eta_label = "ETA:",
         seg_label = "Seg:",
         device_tooltip_prefix = "Apparaat:",
+        backend_label = "Backend",
+        best_device_label = "Beste device",
+        chosen_device_label = "Gekozen device",
         terminal_output_title = "DEMUCS OUTPUT",
         terminal_hint_return_to_art = "Klik >_ om terug te gaan naar art",
         complete_hint_keys = "Enter / ESC",
         complete_target_prefix = "Doel:",
         complete_ok_tooltip = "Sluiten (Enter / ESC)",
+        single_track = "Enkelspoor",
+        multi_track = "Meersporen",
 
         -- Device tooltips
         device_auto_desc = "Kies automatisch de beste backend (CUDA/DirectML/MPS/CPU).",
@@ -472,7 +488,9 @@ local LANGUAGES = {
         device_note_linux_cuda_build = "Je Python-omgeving gebruikt een CUDA PyTorch build (bijv. +cuXXX) maar CUDA is niet beschikbaar. Voor AMD GPU's op Linux heb je meestal een ROCm-enabled PyTorch build nodig (torch.version.hip ingesteld).",
         device_note_cuda_unavailable = "CUDA-backend niet beschikbaar (torch.cuda.is_available() is false).",
         device_note_mps_unavailable = "Apple MPS-backend niet beschikbaar.",
-        device_note_probe_failed = "Device-probe mislukt; veilige opties tonen (Auto/CPU).",
+        device_note_probe_failed = "Device-probe niet voltooid; veilige opties tonen (Auto/CPU).",
+        device_note_probe_completed = "Device-probe voltooid; beschikbare opties zichtbaar.",
+        device_note_no_gpu = "Device-probe voltooid; geen GPU-backends gedetecteerd; veilige opties tonen (Auto/CPU).",
         device_note_probing = "Apparaten detecteren… (kan de eerste keer even duren)",
 
         -- Quick settings menu
@@ -674,6 +692,8 @@ local LANGUAGES = {
         cancelled = "Abgebrochen",
         timeout = "Zeitueberschreitung",
         elapsed = "Vergangen:",
+        progress_label = "Fortschritt",
+        processing_label = "Verarbeitung",
 
         -- Tooltips
         switch_dark = "Zum Dunkelmodus wechseln",
@@ -754,11 +774,16 @@ local LANGUAGES = {
         eta_label = "ETA:",
         seg_label = "Seg:",
         device_tooltip_prefix = "Geraet:",
+        backend_label = "Backend",
+        best_device_label = "Bestes Geraet",
+        chosen_device_label = "Gewaehltes Geraet",
         terminal_output_title = "DEMUCS OUTPUT",
         terminal_hint_return_to_art = "Klick >_ fuer Art-Ansicht",
         complete_hint_keys = "Enter / ESC",
         complete_target_prefix = "Ziel:",
         complete_ok_tooltip = "Schliessen (Enter / ESC)",
+        single_track = "Einzelspur",
+        multi_track = "Mehrspur",
 
         -- Device tooltips
         device_auto_desc = "Beste verfuegbare Backend automatisch waehlen (CUDA/DirectML/MPS/CPU).",
@@ -770,7 +795,9 @@ local LANGUAGES = {
         device_note_linux_cuda_build = "Ihre Python-Umgebung nutzt einen CUDA PyTorch Build (z.B. +cuXXX) aber CUDA ist nicht verfuegbar. Fuer AMD GPUs unter Linux benoetigen Sie typischerweise einen ROCm-faehigen PyTorch Build (torch.version.hip gesetzt).",
         device_note_cuda_unavailable = "CUDA Backend nicht verfuegbar (torch.cuda.is_available() ist false).",
         device_note_mps_unavailable = "Apple MPS Backend nicht verfuegbar.",
-        device_note_probe_failed = "Device-Probe fehlgeschlagen; sichere Optionen (Auto/CPU) werden angezeigt.",
+        device_note_probe_failed = "Device-Probe nicht abgeschlossen; sichere Optionen (Auto/CPU) werden angezeigt.",
+        device_note_probe_completed = "Device-Probe abgeschlossen; verfügbare Optionen werden angezeigt.",
+        device_note_no_gpu = "Device-Probe abgeschlossen; keine GPU-Backends erkannt; sichere Optionen (Auto/CPU) werden angezeigt.",
         device_note_probing = "Geraete werden erkannt… (kann beim ersten Mal kurz dauern)",
 
         -- Quick settings menu

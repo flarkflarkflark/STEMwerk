@@ -13,7 +13,6 @@ end
 
 local function getOS()
     local sep = package.config:sub(1, 1)
-    if sep == "\\" then return "Windows" end
     local osName = reaper.GetOS() or ""
     if osName:match("OSX") or osName:match("macOS") then return "macOS" end
     return "Linux"
@@ -57,6 +56,37 @@ local function setExt(key, value)
     if reaper and reaper.SetExtState then
         reaper.SetExtState(EXT_SECTION, key, tostring(value), true)
     end
+end
+
+    -- TEST: Toon Python-versie in Reaper-console
+    local function showPythonVersion()
+        local pythonExe = "python" -- gebruik globale python
+        local version, output = getPythonVersion(pythonExe)
+        reaper.ShowConsoleMsg("Python executable: " .. pythonExe .. "\n")
+        reaper.ShowConsoleMsg("Python version: " .. tostring(version) .. "\n")
+        reaper.ShowConsoleMsg("Raw output: " .. tostring(output) .. "\n")
+    end
+
+    -- Roep de testfunctie aan (voor debug/demo)
+    -- Verplaatst naar het einde van het script zodat alle functies beschikbaar zijn
+
+
+local function getPythonVersion(python)
+    local tempFile = os.tmpname() .. ".txt"
+    local cmd = quoteArg(python) .. ' -c "import sys; print(sys.version)" > ' .. quoteArg(tempFile)
+    local rc = exec(cmd, 15000)
+    local out = nil
+    if rc == 0 then
+        local f = io.open(tempFile, "r")
+        if f then
+            out = f:read("*a")
+            f:close()
+            os.remove(tempFile)
+        end
+    end
+    if not out then return nil, nil end
+    local v = (out or ""):match("(%d+%.%d+%.%d+)")
+    return v, out
 end
 
 local function getHome()
@@ -130,15 +160,18 @@ local function detectPython()
     end
 
     for _, p in ipairs(candidates) do
+        reaper.ShowConsoleMsg("Probeer python pad: " .. tostring(p) .. "\n")
+        local v, out = nil, nil
         if p == "python" or p == "python3" then
-            local v = select(1, getPythonVersion(p))
-            if v then return p end
+            v, out = getPythonVersion(p)
         else
             if fileExists(p) then
-                local v = select(1, getPythonVersion(p))
-                if v then return p end
+                v, out = getPythonVersion(p)
             end
         end
+        reaper.ShowConsoleMsg("Resultaat versie: " .. tostring(v) .. "\n")
+        reaper.ShowConsoleMsg("Exec output: " .. tostring(out) .. "\n")
+        if v then return p end
     end
 
     return OS == "Windows" and "python" or "python3"

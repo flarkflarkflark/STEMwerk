@@ -1,0 +1,44 @@
+WIN & AMD GPU PERFORMANCE
+
+System Specs
+- OS: Microsoft Windows 11 Pro (10.0.26200 build 26200)
+- Host: REAPER 7.49
+- CPU: AMD Ryzen 7 7840HS (8C/16T, max 3.8 GHz)
+- RAM: 63.3 GB
+- GPU0: AMD Radeon RX 9070 (driver 32.0.22029.9039, VRAM 16 GB)
+- GPU1: AMD Radeon 780M Graphics (driver 32.0.22029.9039, VRAM shared*)
+- *iGPU uses shared system memory; Windows reports AdapterRAM separately.
+
+Software Stack
+- audio-separator 0.40.0
+- torch-directml 0.2.5.dev240914
+- onnxruntime-directml 1.23.0
+- torch 2.4.1
+
+Benchmark Setup
+- STEMwerk model: htdemucs_ft
+- Selection: 30.0s time selection
+- Items/tracks: 2 items on 2 tracks
+- Mode: Sequential (single track processing)
+- Stems: Vocals, Drums, Bass, Other
+
+Results (avg of 2 tracks)
+- AMD Radeon RX 9070 (DirectML 0): 49.5s | 0.61x realtime | 100% time | 100% speed
+- CPU: 68.5s | 0.44x realtime | 138% time | 72% speed
+- AMD Radeon 780M (DirectML 1): 84.0s | 0.36x realtime | 170% time | 59% speed
+
+Notes
+- Relative time = (avg_time / best_time) * 100
+- Relative speed = (best_time / avg_time) * 100
+- Best device here is AMD Radeon RX 9070 (DirectML 0)
+
+Raw log sources
+- %TEMP%\STEMwerk_1766636088_8995089_4\track_1\separation_log.txt
+- %TEMP%\STEMwerk_1766636088_8995089_4\track_2\separation_log.txt
+- %TEMP%\STEMwerk_1766635933_8840664_2\track_1\separation_log.txt
+- %TEMP%\STEMwerk_1766635933_8840664_2\track_2\separation_log.txt
+- %TEMP%\STEMwerk_1766636203_9110058_6\track_1\separation_log.txt
+- %TEMP%\STEMwerk_1766636203_9110058_6\track_2\separation_log.txt
+
+Chart
+- C:\Users\Administrator\Documents\STEMwerk\outdir\benchmarks\benchmark_3way.png

@@ -432,21 +432,75 @@ def separate_stems(input_file: str, output_dir: str, model_name: str = "htdemucs
             else:
                 separator_device = "privateuseone:0"
         except ImportError:
-            separator_device = "cpu"
-            print("WARNING: DirectML requested but torch-directml not installed, using CPU", file=sys.stderr)
+            # If torch_directml is not installed, check whether ONNX Runtime DirectML is available
+            try:
+                ort_dml = _pkg_version("onnxruntime-directml") or _pkg_version("onnxruntime-gpu") or _pkg_version("onnxruntime")
+            except Exception:
+                ort_dml = None
+            if ort_dml:
+                # audio-separator will use ONNX Runtime + DirectML where available.
+                # Use the privateuseone: namespace so downstream libs that look for DirectML
+                # device strings still get a DirectML device reference.
+                if device == "directml":
+                    separator_device = "privateuseone:0"
+                else:
+                    device_idx = device.split(":")[1] if ":" in device else "0"
+                    separator_device = f"privateuseone:{device_idx}"
+                print(f"DirectML requested but torch-directml not installed; using ONNX Runtime DirectML (detected {ort_dml})", file=sys.stderr)
+            else:
+                separator_device = "cpu"
+                print("WARNING: DirectML requested but neither torch-directml nor onnxruntime-directml are installed; using CPU", file=sys.stderr)
     else:
         # cuda:N or rocm:N format - pass through as-is
         separator_device = device
 
     # Initialize separator
+    use_directml = isinstance(device, str) and device.startswith("directml")
+
+    # Hint to ONNX Runtime which DirectML device to pick when multiple GPUs are present.
+    if use_directml:
+        try:
+            os.environ["ORT_DML_DEFAULT_DEVICE_ID"] = str(int(device.split(":")[1])) if ":" in device else "0"
+        except Exception:
+            os.environ["ORT_DML_DEFAULT_DEVICE_ID"] = "0"
+
     separator = Separator(
         output_dir=output_dir,
         output_format="WAV",
         normalization_threshold=0.9,
         log_level=10,  # DEBUG
+        use_directml=use_directml,
         mdx_params={"device": separator_device},
         demucs_params={"device": separator_device}
     )
+
+    # Force the selected DirectML device index because audio-separator defaults to device 0.
+    if use_directml:
+        try:
+            import torch_directml
+            try:
+                dml_index = int(device.split(":")[1]) if ":" in device else 0
+            except Exception:
+                dml_index = 0
+            separator.torch_device = torch_directml.device(dml_index)
+            separator.torch_device_dml = separator.torch_device
+            print(f"STEMWERK: Forced DirectML device index {dml_index}", file=sys.stderr)
+        except Exception as e:
+            print(f"WARNING: Failed to force DirectML device: {e}", file=sys.stderr)
+
+    # Report chosen backend for clarity (helps UIs show accurate tooltips)
+    try:
+        backend = "cpu"
+        try:
+            import torch_directml
+            backend = "torch_directml"
+        except Exception:
+            # prefer ONNX/DirectML if available
+            if _pkg_version("onnxruntime-directml") or _pkg_version("onnxruntime-gpu"):
+                backend = "onnxruntime-directml"
+        print(f"Backend selected: {backend}", file=sys.stderr)
+    except Exception:
+        pass
 
     emit_progress(3, f"Loading AI model [{device_name}]")
 

@@ -1,6 +1,9 @@
+-- Minimal debug stub so early callers won't fail; real debugLog defined later.
+function debugLog(msg) end
+function clearDebugLog() end
 -- @description Stemwerk: Main
 -- @author flarkAUDIO
--- @version 2.0.0
+-- @version 2.1.4
 -- @changelog
 --   v2.0.0: i18n support + UI polish + device selection
 --   v1.0.0: Initial release
@@ -106,23 +109,49 @@ end
 local function canRunPython(pythonCmd)
     if not pythonCmd or pythonCmd == "" then return false end
 
-    -- If the user provided an absolute path, accept it when it's executable.
-    -- (REAPER's ExecProcess can be finicky with quoting on some systems; this avoids false negatives.)
+    -- If the user provided an absolute path, check if file exists
     if isAbsolutePath(pythonCmd) and fileExists(pythonCmd) then
-        -- Best effort executable bit check (Unix)
-        if OS ~= "Windows" then
+        -- On Windows, actually try to run python.exe --version and log output/errors
+        if OS == "Windows" then
+            local cmd = quoteArg(pythonCmd) .. " --version"
+            local rc, out = execProcess(cmd, 12000)
+            debugLog("canRunPython Windows: cmd=" .. tostring(cmd) .. " rc=" .. tostring(rc) .. " out=" .. tostring(out))
+            if rc == 0 and out and out:find("Python") then
+                return true
+            else
+                debugLog("canRunPython Windows: failed to run python, output: " .. tostring(out))
+                return false
+            end
+        else
+            -- Best effort executable bit check (Unix)
             local ok, _, code = os.execute(quoteArg(pythonCmd) .. " --version >/dev/null 2>&1")
             if ok == true or ok == 0 then return true end
-            -- Fall through to ExecProcess check below
-        else
-            return true
         end
     end
 
     -- Avoid nested quotes; simplest cross-platform check.
     local cmd = quoteArg(pythonCmd) .. " --version"
-    local rc, _out = execProcess(cmd, 12000)
-    if rc == 0 then return true end
+    local rc, out = execProcess(cmd, 12000)
+    debugLog("canRunPython: cmd=" .. tostring(cmd) .. " rc=" .. tostring(rc) .. " out=" .. tostring(out))
+    if rc == 0 then
+        -- Some ExecProcess implementations return a successful rc but no captured output.
+        -- Try a popen fallback to capture stdout/stderr; if that isn't available, treat rc==0 as success.
+        if out and out:find("Python") then return true end
+        if OS == "Windows" then
+            local h = io.popen(cmd .. " 2>&1")
+            if h then
+                local content = h:read("*a") or ""
+                local ok, _, code = h:close()
+                debugLog("canRunPython popen rc=" .. tostring(code) .. " outLen=" .. tostring(#content))
+                if content and content:find("Python") then return true end
+            end
+            -- No output but exit code 0 -> treat as runnable
+            return true
+        else
+            -- On Unix, use exit code as primary indicator
+            return true
+        end
+    end
 
     -- Final fallback for Unix shells if ExecProcess is problematic
     if OS ~= "Windows" then
@@ -222,6 +251,21 @@ local function getHome()
     end
 end
 
+-- Shorten vendor-prefixed GPU names for UI (e.g. "AMD Radeon RX 9070" -> "RX 9070").
+local function sanitizeFriendlyName(name)
+    if not name then return name end
+    local lbl = tostring(name)
+    lbl = lbl:gsub("^%s+", "")
+    lbl = lbl:gsub("[Aa][Mm][Dd]%s*[Rr]adeon%s*", "")
+    lbl = lbl:gsub("[Nn][Vv][Ii][Dd][Ii][Aa]%s*[Gg]e[Ff]orce%s*", "")
+    lbl = lbl:gsub("[Nn][Vv][Ii][Dd][Ii][Aa]%s*", "")
+    lbl = lbl:gsub("[Ii][Nn][Tt][Ee][Ll]%s*", "")
+    lbl = lbl:gsub("%s*[Gg]raphics%s*$", "")
+    lbl = lbl:gsub("%s+", " ")
+    lbl = lbl:gsub("^%s+", ""):gsub("%s+$", "")
+    return lbl
+end
+
 -- Configuration - Auto-detect paths (cross-platform)
 local function findPython()
     local override = getExtStateValue("pythonPath")
@@ -232,10 +276,42 @@ local function findPython()
             resolved = script_path .. resolved
         end
 
-        if (isAbsolutePath(resolved) and fileExists(resolved) and canRunPython(resolved)) or (not isAbsolutePath(resolved) and canRunPython(resolved)) then
+        -- If the user provided an absolute path that exists, trust it (avoid false negatives).
+        if isAbsolutePath(resolved) and fileExists(resolved) then
+            debugLog("pythonPath override exists, accepting: " .. tostring(resolved))
+            return resolved
+        end
+
+        -- Otherwise fall back to attempting to run the command to verify it.
+        if (not isAbsolutePath(resolved) and canRunPython(resolved)) or (isAbsolutePath(resolved) and fileExists(resolved) and canRunPython(resolved)) then
             return resolved
         end
         debugLog("pythonPath override not runnable: " .. tostring(resolved))
+        -- Save detailed override diagnostics to repo-visible file for debugging permissions/quoting issues
+        local dbgPath = script_path .. "python_override_test.txt"
+        local f = io.open(dbgPath, "w")
+        if f then
+            f:write("python override: " .. tostring(resolved) .. "\n")
+            f:write("fileExists: " .. tostring(fileExists(resolved)) .. "\n")
+            -- Attempt to run via reaper.ExecProcess if available
+            if reaper and reaper.ExecProcess then
+                local rc, out = reaper.ExecProcess(quoteArg(resolved) .. " --version", 8000)
+                f:write("ExecProcess rc=" .. tostring(rc) .. " outLen=" .. tostring(out and #out or 0) .. "\n")
+                f:write("ExecProcess out:\n" .. tostring(out) .. "\n")
+            end
+            -- Try io.popen (may be blocked in some environments)
+            local okOut = nil
+            local h = io.popen('"' .. tostring(resolved) .. '" --version 2>&1')
+            if h then
+                okOut = h:read("*a") or ""
+                local ok, _, code = h:close()
+                f:write("io.popen rc=" .. tostring(code) .. " outLen=" .. tostring(#okOut) .. "\n")
+                f:write("io.popen out:\n" .. tostring(okOut) .. "\n")
+            else
+                f:write("io.popen not available\n")
+            end
+            f:close()
+        end
     end
 
     local paths = {}
@@ -243,10 +319,13 @@ local function findPython()
 
     if OS == "Windows" then
         -- Windows paths - check venvs first
+        -- Prefer workspace GPU venv first, then regular venv: allow .venv-gpu for GPU-capable env
+        table.insert(paths, script_path .. "..\\..\\.venv-gpu\\Scripts\\python.exe")
         -- Prefer workspace venv: <repo>/.venv (two levels up from scripts/reaper/)
         table.insert(paths, script_path .. "..\\..\\.venv\\Scripts\\python.exe")
         table.insert(paths, script_path .. ".venv\\Scripts\\python.exe")
         table.insert(paths, home .. "\\Documents\\STEMwerk\\.venv\\Scripts\\python.exe")
+        table.insert(paths, "C:\\Users\\Administrator\\Documents\\STEMwerk\\.venv-gpu\\Scripts\\python.exe")
         table.insert(paths, "C:\\Users\\Administrator\\Documents\\STEMwerk\\.venv\\Scripts\\python.exe")
         table.insert(paths, home .. "\\.STEMwerk\\.venv\\Scripts\\python.exe")
         table.insert(paths, script_path .. "..\\..\\..\\venv\\Scripts\\python.exe")
@@ -330,6 +409,12 @@ local SEPARATOR_SCRIPT = findSeparatorScript()
 debugLog("Detected Python: " .. tostring(PYTHON_PATH))
 debugLog("Detected separator script: " .. tostring(SEPARATOR_SCRIPT))
 
+-- Persist the chosen Python path into REAPER ExtState so the launcher uses it
+if reaper and reaper.SetExtState then
+    reaper.SetExtState(EXT_SECTION, "pythonPath", tostring(PYTHON_PATH), true)
+    debugLog("Persisted pythonPath to ExtState: " .. tostring(PYTHON_PATH))
+end
+
 -- Stem configuration (with selection state)
 -- First 4 are always shown, Guitar/Piano only for 6-stem model
 local STEMS = {
@@ -342,7 +427,7 @@ local STEMS = {
 }
 
 -- App version (single source of truth)
-local APP_VERSION = "2.0.0"
+local APP_VERSION = "2.1.4"
 
 -- Forward declarations (these are defined later in the file, but used by early helpers)
 local SETTINGS
@@ -352,13 +437,12 @@ local saveSettings
 local DEVICES = {
     { id = "auto", name = "Auto", desc = "Automatically select best GPU" },
     { id = "cpu", name = "CPU", desc = "Force CPU processing (slower)" },
-    -- NOTE:
-    -- - "cuda:*" requires a CUDA-capable PyTorch build (typically NVIDIA; ROCm builds may also expose via torch.cuda on supported AMD).
-    -- - "directml:*" is Windows-only (requires torch-directml).
-    { id = "cuda:0", name = "CUDA 0", desc = "CUDA device 0 (requires GPU backend; usually NVIDIA)" },
-    { id = "cuda:1", name = "CUDA 1", desc = "CUDA device 1 (requires GPU backend; usually NVIDIA)" },
-    { id = "directml:0", name = "DirectML 0", desc = "Windows DirectML device 0 (requires torch-directml)" },
-    { id = "directml:1", name = "DirectML 1", desc = "Windows DirectML device 1 (requires torch-directml)" },
+    -- Generic GPU entries (unverified) so users can manually choose a GPU
+    -- when the runtime probe fails.
+    { id = "directml:0", name = "DirectML 0", type = "directml", desc = "DirectML GPU 0 (unverified)" },
+    { id = "directml:1", name = "DirectML 1", type = "directml", desc = "DirectML GPU 1 (unverified)" },
+    { id = "cuda:0", name = "CUDA 0", type = "cuda", desc = "CUDA GPU 0 (unverified)" },
+    { id = "cuda:1", name = "CUDA 1", type = "cuda", desc = "CUDA GPU 1 (unverified)" },
 }
 
 -- Runtime-probed devices (preferred over the static DEVICES table).
@@ -534,6 +618,64 @@ function applyRuntimeDevicesFromParsed(devices, envJson, now)
         return tostring(id or "")
     end
 
+    local function sanitizeFriendlyName(name)
+        if not name then return name end
+        local lbl = tostring(name)
+        lbl = lbl:gsub("^%s+", "")
+        lbl = lbl:gsub("[Aa][Mm][Dd]%s*[Rr]adeon%s*", "")
+        lbl = lbl:gsub("[Nn][Vv][Ii][Dd][Ii][Aa]%s*[Gg]e[Ff]orce%s*", "")
+        lbl = lbl:gsub("[Nn][Vv][Ii][Dd][Ii][Aa]%s*", "")
+        lbl = lbl:gsub("[Ii][Nn][Tt][Ee][Ll]%s*", "")
+        lbl = lbl:gsub("%s*[Gg]raphics%s*$", "")
+        lbl = lbl:gsub("%s+", " ")
+        lbl = lbl:gsub("^%s+", ""):gsub("%s+$", "")
+        return lbl
+    end
+
+    -- Try to load an optional DirectML/CUDA mapping file that maps device ids
+    -- (e.g. "directml:0") to a human-friendly GPU name discovered by the
+    -- user or by external probing. File is optional.
+    local function loadDeviceMap()
+        local candidates = {}
+        local name = "directml_device_map.json"
+        if type(script_path) == "string" and script_path ~= "" then
+            table.insert(candidates, script_path .. name)
+            table.insert(candidates, script_path .. ".." .. PATH_SEP .. name)
+        end
+        -- Try repo-relative common location
+        if type(repo_root) == "string" and repo_root ~= "" then
+            table.insert(candidates, repo_root .. "scripts" .. PATH_SEP .. "reaper" .. PATH_SEP .. name)
+        end
+        -- Try user Documents/STEMwerk path
+        local home = getHome()
+        if home then
+            if PATH_SEP == "\\" then
+                table.insert(candidates, home .. "\\Documents\\STEMwerk\\scripts\\reaper\\" .. name)
+            else
+                table.insert(candidates, home .. "/Documents/STEMwerk/scripts/reaper/" .. name)
+            end
+        end
+        -- Finally try current working dir and script-local name
+        table.insert(candidates, name)
+
+        for _, mapPath in ipairs(candidates) do
+            local f = io.open(mapPath, "r")
+            if f then
+                local ok, data = pcall(function() return f:read("*a") end)
+                f:close()
+                if ok and data and data ~= "" then
+                    local map = {}
+                    for k, v in data:gmatch('"([^"]+)"%s*:%s*"([^"]+)"') do
+                        map[k] = v
+                    end
+                    return map
+                end
+            end
+        end
+        return nil
+    end
+    local deviceMap = loadDeviceMap() or {}
+
     -- Filter out backends that can never work on this OS.
     if OS ~= "Windows" then
         local filtered = {}
@@ -547,8 +689,11 @@ function applyRuntimeDevicesFromParsed(devices, envJson, now)
 
     for _, d in ipairs(devices) do
         d.fullName = d.name
+        if deviceMap[d.id] then
+            d.fullName = deviceMap[d.id]
+        end
         if d.id and (d.id:match("^cuda:%d+$") or d.id:match("^directml:%d+$") or d.type == "cuda" or d.type == "directml") then
-            d.uiName = compactGpuLabel(d.id)
+            d.uiName = sanitizeFriendlyName(d.fullName or d.name) or compactGpuLabel(d.id)
         else
             d.uiName = d.name
         end
@@ -568,6 +713,67 @@ function applyRuntimeDevicesFromParsed(devices, envJson, now)
     RUNTIME_DEVICES = devices
     RUNTIME_DEVICE_NOTE_KEY = buildDeviceNoteFromEnvJson(envJson, devices)
     RUNTIME_DEVICE_LAST_PROBE = now
+
+    -- Auto-select best device by running a very short benchmark per GPU candidate.
+    local function parseBenchOutput(out)
+        if not out then return nil end
+        for line in out:gmatch("[^\r\n]+") do
+            local s = line:match("elapsed=([%d%.]+)s") or line:match("Completed on device=.*elapsed=([%d%.]+)s")
+            if s then
+                local n = tonumber(s)
+                if n then return n end
+            end
+        end
+        return nil
+    end
+
+    local function quickBenchDevice(d)
+        if not d or not d.id then return nil end
+        -- Only benchmark GPU backends
+        if not (d.type == "directml" or d.type == "cuda" or (d.id and d.id:match("^directml:%d+$") or d.id:match("^cuda:%d+$"))) then
+            return nil
+        end
+        -- Ensure the helper script exists
+        local benchScript = script_path .. "check_directml_runtime.py"
+        if not fileExists(benchScript) then
+            -- try repo location
+            benchScript = (repo_root or "") .. "scripts" .. PATH_SEP .. "reaper" .. PATH_SEP .. "check_directml_runtime.py"
+            if not fileExists(benchScript) then return nil end
+        end
+        local idx = tonumber((d.id or ""):match("%d+$")) or 0
+        local cmd = quoteArg(PYTHON_PATH) .. " -u " .. quoteArg(benchScript) .. " --size 800 --iters 1 --dml-device " .. tostring(idx)
+        local rc, out = execCapture(cmd, 20000)
+        if rc ~= 0 then return nil end
+        return parseBenchOutput(out)
+    end
+
+    local function autoSelectBestDevice(devices)
+        if not devices or #devices == 0 then return end
+        local bestId = nil
+        local bestTime = nil
+        local tried = 0
+        for _, d in ipairs(devices) do
+            if tried >= 3 then break end -- limit probes to at most 3 devices
+            local t = quickBenchDevice(d)
+            if t then
+                tried = tried + 1
+                if not bestTime or t < bestTime then
+                    bestTime = t
+                    bestId = d.id
+                end
+            end
+        end
+        if bestId and SETTINGS and (not SETTINGS.device or SETTINGS.device == "auto") then
+            SETTINGS.device = bestId
+            if saveSettings then saveSettings() end
+            RUNTIME_DEVICE_NOTE_KEY = "device_note_auto_selected"
+            debugLog("Auto-selected best device: " .. tostring(bestId) .. " time=" .. tostring(bestTime))
+        end
+    end
+
+    -- Try to pick the best GPU automatically in the background (non-blocking UI would be nicer,
+    -- but keep this simple: run a few quick benches so the UI shows the real preferred device).
+    pcall(function() autoSelectBestDevice(RUNTIME_DEVICES) end)
 
     -- If the saved device is no longer available, fall back to auto.
     if SETTINGS and SETTINGS.device then
@@ -667,15 +873,30 @@ function startRuntimeDeviceProbeAsync(force)
             "$done='" .. escPS(doneFile) .. "';" ..
             "$py='" .. escPS(PYTHON_PATH) .. "';" ..
             "$sep='" .. escPS(SEPARATOR_SCRIPT) .. "';" ..
-            "& $py -u $sep --list-devices-machine *> $out; $rc=$LASTEXITCODE;" ..
-            " if ($rc -ne 0) { & $py -u $sep --list-devices *> $out; $rc=$LASTEXITCODE };" ..
+            -- Use Start-Process to ensure proper quoting and redirection on Windows
+            " $p = Start-Process -FilePath $py -ArgumentList @('-u',$sep,'--list-devices-machine') -NoNewWindow -Wait -RedirectStandardOutput $out -RedirectStandardError $out -PassThru; $rc = $p.ExitCode;" ..
+            " if ($rc -ne 0) { $p = Start-Process -FilePath $py -ArgumentList @('-u',$sep,'--list-devices') -NoNewWindow -Wait -RedirectStandardOutput $out -RedirectStandardError $out -PassThru; $rc = $p.ExitCode };" ..
             " Set-Content -Path $rcfile -Value $rc -Encoding ascii;" ..
-            " Set-Content -Path $done -Value 'DONE' -Encoding ascii"
+            " Set-Content -Path $done -Value 'DONE' -Encoding ascii;" ..
+            " Try { Copy-Item -Path $out -Destination '" .. escPS(script_path .. "probe_out_last.txt") .. "' -Force } Catch {};" ..
+            " Try { Copy-Item -Path $rcfile -Destination '" .. escPS(script_path .. "probe_rc_last.txt") .. "' -Force } Catch {}"
 
         vbsFile:write('Set sh = CreateObject("WScript.Shell")' .. "\n")
         vbsFile:write('cmd = "powershell -NoProfile -ExecutionPolicy Bypass -Command ""' .. psInner .. '"""' .. "\n")
         vbsFile:write('sh.Run cmd, 0, False' .. "\n")
         vbsFile:close()
+
+        -- Save debug copy of the generated PowerShell inner command and VBS wrapper
+        local dbgPath = script_path .. "probe_debug_last.txt"
+        local dbgF = io.open(dbgPath, "w")
+        if dbgF then
+            dbgF:write("--- PS inner (for device probe) ---\n")
+            dbgF:write(psInner .. "\n\n")
+            dbgF:write("--- VBS wrapper content (will run wscript) ---\n")
+            local vbsContent = 'Set sh = CreateObject("WScript.Shell")\n' .. 'cmd = "powershell -NoProfile -ExecutionPolicy Bypass -Command ""' .. psInner .. '"""\n' .. 'sh.Run cmd, 0, False\n'
+            dbgF:write(vbsContent .. "\n")
+            dbgF:close()
+        end
 
         local wscriptCmd = 'wscript "' .. vbsPath .. '"'
         if reaper.ExecProcess then
@@ -9713,13 +9934,18 @@ local function dialogLoop()
         if drawRadio(col3X, modelY, SETTINGS.model == model.id, model.name, nil, modelBoxW, nil, nil, commonBtnFontSize) then
             local prevModel = SETTINGS.model
             SETTINGS.model = model.id
-            -- If switching away from 6-stem, clear 6-stem-only selections (Guitar/Piano).
-            if tostring(SETTINGS.model or "") ~= "htdemucs_6s" then
-                for _, st in ipairs(STEMS) do
-                    if st.sixStemOnly then st.selected = false end
-                end
-            end
             if prevModel ~= SETTINGS.model then
+                if tostring(SETTINGS.model or "") == "htdemucs_6s" then
+                    -- Switching to 6-stem: select all six stems by default.
+                    for _, st in ipairs(STEMS) do
+                        st.selected = true
+                    end
+                else
+                    -- Switching away from 6-stem: clear 6-stem-only selections (Guitar/Piano).
+                    for _, st in ipairs(STEMS) do
+                        if st.sixStemOnly then st.selected = false end
+                    end
+                end
                 saveSettings()
             end
         end
@@ -9748,6 +9974,104 @@ local function dialogLoop()
     local deviceY = contentTop + S(20)
 
     local deviceList = RUNTIME_DEVICES or DEVICES
+    -- Load optional device map so placeholders and runtime devices can show friendly names.
+    local function loadDeviceMap()
+        local candidates = {}
+        local name = "directml_device_map.json"
+        if type(script_path) == "string" and script_path ~= "" then
+            table.insert(candidates, script_path .. name)
+            table.insert(candidates, script_path .. ".." .. PATH_SEP .. name)
+        end
+        if type(repo_root) == "string" and repo_root ~= "" then
+            table.insert(candidates, repo_root .. "scripts" .. PATH_SEP .. "reaper" .. PATH_SEP .. name)
+        end
+        local home = getHome()
+        if home then
+            if PATH_SEP == "\\" then
+                table.insert(candidates, home .. "\\Documents\\STEMwerk\\scripts\\reaper\\" .. name)
+            else
+                table.insert(candidates, home .. "/Documents/STEMwerk/scripts/reaper/" .. name)
+            end
+        end
+        table.insert(candidates, name)
+        for _, mapPath in ipairs(candidates) do
+            local f = io.open(mapPath, "r")
+            if f then
+                local ok, data = pcall(function() return f:read("*a") end)
+                f:close()
+                if ok and data and data ~= "" then
+                    local map = {}
+                    for k, v in data:gmatch('"([^\"]+)"%s*:%s*"([^\"]+)"') do
+                        map[k] = v
+                    end
+                    return map
+                end
+            end
+        end
+        return nil
+    end
+    local deviceMap = loadDeviceMap() or {}
+
+    -- If runtime probe returned only a minimal safe list (Auto/CPU),
+    -- also expose the static DEVICES table so users can manually pick
+    -- known GPU backends (DirectML/CUDA) even when probe failed.
+    if RUNTIME_DEVICES and #RUNTIME_DEVICES <= 2 then
+        local seen = {}
+        for _, d in ipairs(deviceList) do seen[d.id] = true end
+        -- Quick python check: only include static CUDA placeholders if CUDA appears available
+        local function python_says_cuda_available()
+            local ok, out = pcall(function()
+                local cmd = quoteArg(PYTHON_PATH) .. " -c \"import torch; print(torch.cuda.is_available())\""
+                local rc, out = execCapture(cmd, 3000)
+                return rc == 0 and (out or ""):match("True")
+            end)
+            return ok and out
+        end
+        local cudaAvailable = python_says_cuda_available()
+        -- Avoid adding generic placeholders when indexed devices already exist
+        local has_directml_index = false
+        local has_cuda_index = false
+        for _, d in ipairs(deviceList) do
+            if tostring(d.id):match("^directml:%d+$") then has_directml_index = true end
+            if tostring(d.id):match("^cuda:%d+$") then has_cuda_index = true end
+        end
+        for _, sd in ipairs(DEVICES) do
+            if not seen[sd.id] then
+                local sd_type = sd.type or (sd.id and sd.id:match("^cuda") and "cuda") or (sd.id and sd.id:match("^directml") and "directml") or ""
+                if sd_type == "cuda" and not cudaAvailable then
+                    -- Skip CUDA placeholder when Python/runtime indicates CUDA unavailable
+                else
+                    if sd.id == "directml" and has_directml_index then
+                        -- skip generic directml when specific directml:N exist
+                    elseif sd.id == "cuda" and has_cuda_index then
+                        -- skip generic cuda when specific cuda:N exist
+                    else
+                        local copy = { id = sd.id, name = sd.name, fullName = sd.name, uiName = sd.name, type = sd_type, desc = sd.desc }
+                        -- Apply deviceMap if available so placeholders can show friendly names
+                        if deviceMap and deviceMap[sd.id] then
+                            copy.fullName = deviceMap[sd.id]
+                            copy.uiName = sanitizeFriendlyName(copy.fullName) or copy.uiName
+                        else
+                            copy.uiName = sanitizeFriendlyName(copy.fullName) or copy.uiName
+                        end
+                        copy.available = false -- mark as not verified by probe
+                        deviceList[#deviceList + 1] = copy
+                    end
+                end
+            end
+        end
+    end
+    -- Apply friendly names from deviceMap and sanitize labels for UI buttons.
+    for _, d in ipairs(deviceList) do
+        d.fullName = d.fullName or d.name
+        if deviceMap[d.id] then d.fullName = deviceMap[d.id] end
+        if d.id and (d.id:match("^cuda:%d+$") or d.id:match("^directml:%d+$") or d.type == "cuda" or d.type == "directml") then
+            d.uiName = sanitizeFriendlyName(d.fullName or d.name)
+        else
+            d.uiName = d.name
+        end
+    end
+
     local deviceLabels = {}
     for i = 1, #deviceList do
         deviceLabels[#deviceLabels + 1] = deviceList[i].uiName or deviceList[i].name
@@ -9762,6 +10086,34 @@ local function dialogLoop()
         ["cuda:1"] = "device_gpu1_desc",
         directml = "device_directml_desc",
     }
+
+    local function cleanDeviceLabel(name)
+        if not name or name == "" then return "" end
+        local lbl = tostring(name)
+        lbl = lbl:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+        return lbl
+    end
+
+    local function chosenDeviceLabel()
+        local selId = SETTINGS.device or "auto"
+        if selId == "auto" then
+            if RUNTIME_DEVICES then
+                for _, d in ipairs(RUNTIME_DEVICES) do
+                    if d.id and not (d.id == "auto" or d.id == "cpu") then
+                        return cleanDeviceLabel(d.fullName or d.name or d.id)
+                    end
+                end
+            end
+            return "Auto"
+        end
+        for _, d in ipairs(deviceList) do
+            if d.id == selId then
+                local label = cleanDeviceLabel(d.fullName or d.name or d.id)
+                return label ~= "" and label or tostring(selId)
+            end
+        end
+        return tostring(selId)
+    end
     
     for _, device in ipairs(deviceList) do
         local label = device.uiName or device.name
@@ -9786,22 +10138,68 @@ local function dialogLoop()
                 tip = tostring(tip or "") .. "\n\n" .. tostring(device.id) .. " — " .. tostring(device.fullName)
             end
         end
-        -- Append runtime note (translated) when applicable.
-        if (device.id == "auto" or device.id == "cpu") and RUNTIME_DEVICE_NOTE_KEY and RUNTIME_DEVICE_NOTE_KEY ~= "" then
-            tip = tostring(tip or "") .. "\n\n" .. T(RUNTIME_DEVICE_NOTE_KEY)
-        end
         -- Append runtime skip note (e.g., ROCm GPU arch unsupported by installed rocBLAS).
         if (device.id == "auto" or device.id == "cpu") and RUNTIME_DEVICE_SKIP_NOTE and RUNTIME_DEVICE_SKIP_NOTE ~= "" then
             tip = tostring(tip or "") .. "\n\n" .. tostring(RUNTIME_DEVICE_SKIP_NOTE)
+        end
+        -- Also append the resolved backend string so users see what the separator will use.
+        if device.id then
+            local function backendLabelFromName(name, id)
+                if name and name ~= "" then
+                    return cleanDeviceLabel(name)
+                end
+                if id and tostring(id):match("^directml:%d+$") then
+                    return tostring(id)
+                end
+                return id and tostring(id) or ""
+            end
+
+            local backend_label = nil
+            if tostring(device.id) == "auto" then
+                local bestDevice = nil
+                if RUNTIME_DEVICES then
+                    for _, d in ipairs(RUNTIME_DEVICES) do
+                        if d.id and not (d.id == "auto" or d.id == "cpu") then
+                            bestDevice = d
+                            break
+                        end
+                    end
+                end
+                if bestDevice then
+                    local bestLabel = backendLabelFromName(bestDevice.fullName or bestDevice.name, bestDevice.id)
+                    backend_label = (T("best_device_label") or "Best device") .. ": " .. bestLabel
+                else
+                    backend_label = "Auto"
+                end
+            else
+                backend_label = backendLabelFromName(device.fullName, device.id)
+            end
+
+            local backend_prefix = T("backend_label") or "Backend"
+            tip = tostring(tip or "") .. "\n\n" .. backend_prefix .. ": " .. backend_label
+        end
+        local chosen_prefix = T("chosen_device_label") or "Chosen device"
+        local chosen_label = chosenDeviceLabel()
+        if chosen_label and chosen_label ~= "" then
+            tip = tostring(tip or "") .. "\n\n" .. chosen_prefix .. ": " .. chosen_label
         end
         setTooltip(col4X, deviceY, deviceBoxW, btnH, tip)
         deviceY = deviceY + S(22)
     end
 
-    -- Device header tooltip: include translated runtime note + any runtime skip notes.
+    -- Device header tooltip: show accurate probe status depending on runtime results.
     local headerTip = nil
-    if RUNTIME_DEVICE_NOTE_KEY and RUNTIME_DEVICE_NOTE_KEY ~= "" then
+    if RUNTIME_DEVICES and #RUNTIME_DEVICES > 0 then
+        -- Check if any non-auto/cpu devices are present
+        local hasGpu = false
+        for _, d in ipairs(RUNTIME_DEVICES) do
+            if d.id and not (d.id == "auto" or d.id == "cpu") then hasGpu = true; break end
+        end
+        headerTip = hasGpu and T("device_note_probe_completed") or T("device_note_no_gpu")
+    elseif RUNTIME_DEVICE_NOTE_KEY and T(RUNTIME_DEVICE_NOTE_KEY) then
         headerTip = T(RUNTIME_DEVICE_NOTE_KEY)
+    else
+        headerTip = T("device_note_probe_failed")
     end
     if RUNTIME_DEVICE_SKIP_NOTE and RUNTIME_DEVICE_SKIP_NOTE ~= "" then
         headerTip = (headerTip and (tostring(headerTip) .. "\n\n") or "") .. tostring(RUNTIME_DEVICE_SKIP_NOTE)
@@ -10617,18 +11015,18 @@ local function runFfmpegExtract(sourceFile, offsetSec, durationSec, outputPath)
         local ok, _, code = os.execute(cmd .. ' >"' .. logPath .. '" 2>&1')
         if ok == true then exitCode = 0
         elseif type(code) == "number" then exitCode = code
-        else exitCode = 1 end
-    else
-        -- Best-effort on Windows: run via cmd.exe so redirection works (still hidden via execHidden).
-        -- Note: cmd quoting is a bit different; this is diagnostic, not performance-critical.
-        local winCmd = 'cmd /c ' .. quoteArg(cmd .. ' >' .. quoteArg(logPath) .. ' 2>&1')
-        execHidden(winCmd)
-        -- We don't get a reliable exit code from execHidden here.
-    end
+	else
+	    -- Best-effort on Windows: run via cmd.exe so redirection works (still hidden via execHidden).
+	    -- Note: cmd quoting is a bit different; this is diagnostic, not performance-critical.
+	    local winCmd = 'cmd /c ' .. quoteArg(cmd .. ' >' .. quoteArg(logPath) .. ' 2>&1')
+	    execHidden(winCmd)
+	    -- We don't get a reliable exit code from execHidden here.
+	end
 
     local sz = fileSizeBytes(outputPath)
     local ok = (sz and sz > 1024)
     return ok, logPath, exitCode
+end
 end
 
 -- Fallback extractor: render audio from REAPER itself (no ffmpeg dependency).
@@ -10738,9 +11136,10 @@ local function renderTakeAccessorToWav(take, startTime, endTime, outputPath)
     return true, nil
 end
 
+
 -- Execute command without showing a window (Windows-specific)
 -- On Windows, os.execute() shows a brief CMD flash. This avoids that.
-local function execHidden(cmd)
+function execHidden(cmd)
     debugLog("execHidden called")
     debugLog("  Command: " .. cmd:sub(1, 200) .. (cmd:len() > 200 and ".." or ""))
     if OS == "Windows" then
@@ -11241,6 +11640,94 @@ local processAllStemsResult
 local PROGRESS_BASE_W = 480
 local PROGRESS_BASE_H = 420
 
+local function normalizeProgressStage(stage)
+    stage = tostring(stage or "")
+    -- Strip timing + device suffixes to keep the terminal line clean.
+    stage = stage:gsub("%s*%b[]", "")
+    stage = stage:gsub("%s*%b()", "")
+    stage = stage:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    if stage == "" then
+        stage = T("processing_label") or "Processing"
+    elseif stage:lower():match("^processing") then
+        stage = T("processing_label") or "Processing"
+    end
+    return stage
+end
+
+local function formatProgressLine(rawLine, trackIdx)
+    if not rawLine or rawLine == "" then return nil end
+    local percent, stage = rawLine:match("PROGRESS:(%d+):(.+)")
+    if not percent then return nil end
+    local progressLabel = T("progress_label") or "Progress"
+    local stageLabel = normalizeProgressStage(stage)
+    local prefix = ""
+    if trackIdx then
+        local trackLabel = T("track_prefix") or "Track"
+        prefix = "[" .. tostring(trackLabel) .. " " .. tostring(trackIdx) .. "] "
+    end
+    return string.format("%s%s: %s%% %s", prefix, progressLabel, percent, stageLabel)
+end
+
+local function drawTerminalFx(x, y, w, h, now, borderR, borderG, borderB, progR, progG, progB)
+    if not SETTINGS.visualFX then return end
+    if not x or not y or not w or not h then return end
+    if w < 4 or h < 4 then return end
+    now = now or os.clock()
+    local scale = 1
+    if PROGRESS_BASE_W and PROGRESS_BASE_H then
+        scale = math.min(w / PROGRESS_BASE_W, h / PROGRESS_BASE_H)
+        scale = math.max(0.5, math.min(4.0, scale))
+    end
+    local function px(val) return math.floor(val * scale + 0.5) end
+
+    local scanY = y + (math.floor(now * 22) % math.max(1, math.floor(h - 2)))
+    gfx.set(borderR or 0, borderG or 0, borderB or 0, SETTINGS.darkMode and 0.12 or 0.18)
+    gfx.rect(x + 1, scanY, w - 2, 1, 1)
+
+    local lineStep = px(4)
+    local lineAlpha = SETTINGS.darkMode and 0.05 or 0.04
+    gfx.set(borderR or 0, borderG or 0, borderB or 0, lineAlpha)
+    for yy = y + 1, y + h - 2, lineStep do
+        gfx.line(x + 1, yy, x + w - 2, yy)
+    end
+
+    local barH = px(5)
+    local barW = math.max(px(28), 14)
+    local pad = px(4)
+    local span = math.max(1, w - (pad * 2) - barW)
+    local cycle = 0.18
+    local theta = now * cycle * (math.pi * 2)
+    local smooth = (1 - math.cos(theta)) * 0.5
+    local velocity = math.sin(theta)
+    local edge = 1 - math.min(smooth, 1 - smooth) * 2
+    local squash = edge * edge
+    local ledW = barW * (1 - 0.18 * squash)
+    local ledH = barH * (1 + 0.12 * squash)
+    local ledX = x + pad + (span * smooth) + (barW - ledW) * 0.5
+    local ledY = y + h - pad - ledH
+    gfx.set(progR or 1, progG or 1, progB or 1, SETTINGS.darkMode and 0.55 or 0.5)
+    gfx.rect(ledX, ledY, ledW, ledH, 1)
+
+    local tailScale = math.min(1, math.abs(velocity) * 1.25) * (1 - 0.35 * squash)
+    local tail1, tail2, tail3 = px(10) * tailScale, px(20) * tailScale, px(30) * tailScale
+    local tailDir = velocity >= 0 and -1 or 1
+
+    local tailX = (tailDir == -1) and (ledX - tail1) or ledX
+    local tailW = ledW + tail1
+    gfx.set(progR or 1, progG or 1, progB or 1, SETTINGS.darkMode and 0.28 or 0.2)
+    gfx.rect(tailX, ledY, tailW, ledH, 1)
+
+    tailX = (tailDir == -1) and (ledX - tail2) or ledX
+    tailW = ledW + tail2
+    gfx.set(progR or 1, progG or 1, progB or 1, SETTINGS.darkMode and 0.18 or 0.12)
+    gfx.rect(tailX, ledY, tailW, ledH, 1)
+
+    tailX = (tailDir == -1) and (ledX - tail3) or ledX
+    tailW = ledW + tail3
+    gfx.set(progR or 1, progG or 1, progB or 1, SETTINGS.darkMode and 0.1 or 0.07)
+    gfx.rect(tailX, ledY + 1, tailW, 1, 1)
+end
+
 -- Progress window resizable flag
 local progressWindowResizableSet = false
 
@@ -11512,8 +11999,9 @@ local function drawProgressWindow()
         gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
         gfx.x = titleX
         gfx.y = titleY
-        gfx.drawstr("AI ")
-        local aiW = gfx.measurestr("AI ")
+        local singleTrackLabel = T("single_track") or "Single-Track"
+        gfx.drawstr(singleTrackLabel .. " ")
+        local aiW = gfx.measurestr(singleTrackLabel .. " ")
 
         drawWavingStemwerkLogo({
             x = titleX + aiW,
@@ -11697,6 +12185,29 @@ local function drawProgressWindow()
         if devName and devName ~= "" then
             tip = tip .. "\n" .. tostring(devName)
         end
+        local chosenPrefix = T("chosen_device_label") or "Chosen device"
+        local chosenId = SETTINGS.device or "auto"
+        local chosenLabel = tostring(chosenId)
+        if chosenId == "auto" then
+            if RUNTIME_DEVICES then
+                for _, d in ipairs(RUNTIME_DEVICES) do
+                    if d.id and not (d.id == "auto" or d.id == "cpu") then
+                        chosenLabel = tostring(d.fullName or d.name or d.id)
+                        break
+                    end
+                end
+            end
+        else
+            if RUNTIME_DEVICES then
+                for _, d in ipairs(RUNTIME_DEVICES) do
+                    if d.id == chosenId then
+                        chosenLabel = tostring(d.fullName or d.name or d.id)
+                        break
+                    end
+                end
+            end
+        end
+        tip = tip .. "\n" .. tostring(chosenPrefix) .. ": " .. tostring(chosenLabel)
         tooltipText = tip
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
     end
@@ -11821,6 +12332,7 @@ local function drawProgressWindow()
             -- Terminal border (green)
             gfx.set(termBorderR, termBorderG, termBorderB, termBorderA)
             gfx.rect(displayX, displayY, displayW, displayH, 0)
+            drawTerminalFx(displayX, displayY, displayW, displayH, os.clock(), termBorderR, termBorderG, termBorderB, termProgR, termProgG, termProgB)
 
             -- Terminal header
             gfx.set(termHeaderR, termHeaderG, termHeaderB, termHeaderA)
@@ -11840,7 +12352,8 @@ local function drawProgressWindow()
                     local f = io.open(progressState.stdoutFile, "r")
                     if f then
                         for line in f:lines() do
-                            table.insert(progressState.terminalLines, line)
+                            local formatted = formatProgressLine(line, 1)
+                            table.insert(progressState.terminalLines, formatted or line)
                         end
                         f:close()
                     end
@@ -11856,6 +12369,7 @@ local function drawProgressWindow()
 
             gfx.setfont(1, "Courier", PS(9))
             local lineY = termContentY
+            local progressNeedle = (T("progress_label") or "Progress") .. ":"
             for i = startLine, #progressState.terminalLines do
                 if lineY < displayY + displayH - PS(5) then
                     local line = progressState.terminalLines[i] or ""
@@ -11867,7 +12381,7 @@ local function drawProgressWindow()
                         gfx.set(termErrR, termErrG, termErrB, termErrA)  -- Error
                     elseif line:match("warning") or line:match("Warning") then
                         gfx.set(termWarnR, termWarnG, termWarnB, termWarnA)  -- Warning
-                    elseif line:match("PROGRESS") then
+                    elseif line:match("PROGRESS") or line:find(progressNeedle, 1, true) then
                         gfx.set(termProgR, termProgG, termProgB, termProgA)  -- Progress
                     elseif line:match("Separating") or line:match("100%%") then
                         gfx.set(termOkR, termOkG, termOkB, termOkA)  -- Success
@@ -11957,9 +12471,17 @@ local function drawProgressWindow()
     progressState.wasRightMouseDown = rightMouseDown
 
     -- Cancel hint (below art/terminal)
+    local bottomEta = nil
+    local stageStr = progressState.stage or ""
+    bottomEta = stageStr:match("ETA%s+([%d]+:%s*%d+)")
+    if bottomEta then bottomEta = bottomEta:gsub("%s+", "") end
     gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 1)
     gfx.setfont(1, "Arial", PS(9))
     local hintText = T("hint_cancel")
+    if bottomEta and bottomEta ~= "" then
+        local etaLabel = T("eta_label") or "ETA:"
+        hintText = tostring(etaLabel) .. " " .. tostring(bottomEta) .. " | " .. tostring(hintText)
+    end
     local hintW = gfx.measurestr(hintText)
     gfx.x = (w - hintW) / 2
     gfx.y = h - PS(20)
@@ -14385,8 +14907,9 @@ function drawMultiTrackProgressWindow()
     gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
     gfx.x = titleX
     gfx.y = titleY
-    gfx.drawstr("Multi-Track ")
-    local prefixW = gfx.measurestr("Multi-Track ")
+    local multiTrackLabel = T("multi_track") or "Multi-Track"
+    gfx.drawstr(multiTrackLabel .. " ")
+    local prefixW = gfx.measurestr(multiTrackLabel .. " ")
 
     local logoW = measureStemwerkLogo(PS(16), "Arial", true)
     drawWavingStemwerkLogo({
@@ -14444,9 +14967,33 @@ function drawMultiTrackProgressWindow()
     gfx.y = langY
     gfx.drawstr(langCode)
 
+    -- Stem indicators (simple colored boxes, like single-track)
+    local selectedStems = {}
+    for _, stem in ipairs(STEMS) do
+        if stem.selected and (not stem.sixStemOnly or SETTINGS.model == "htdemucs_6s") then
+            table.insert(selectedStems, stem)
+        end
+    end
+
+    local stemRowY = titleY + PS(20)
+    local stemBoxSize = PS(12)
+    local stemX = PS(20)
+    if #selectedStems > 0 then
+        gfx.setfont(1, "Arial", PS(10))
+        for _, stem in ipairs(selectedStems) do
+            gfx.set(stem.color[1]/255, stem.color[2]/255, stem.color[3]/255, 1)
+            gfx.rect(stemX, stemRowY, stemBoxSize, stemBoxSize, 1)
+            gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+            gfx.x = stemX + stemBoxSize + PS(5)
+            gfx.y = stemRowY + PS(1)
+            gfx.drawstr(stem.name)
+            stemX = stemX + stemBoxSize + gfx.measurestr(stem.name) + PS(16)
+        end
+    end
+
     -- Overall progress bar
     local barX = PS(20)
-    local barY = PS(55)
+    local barY = (#selectedStems > 0) and (stemRowY + stemBoxSize + PS(8)) or PS(55)
     local barW = w - PS(40)
     local barH = PS(20)
     local overallProgress = getOverallProgress()
@@ -14633,11 +15180,13 @@ function drawMultiTrackProgressWindow()
             termTextB = (termTextB * 0.85) + (activeBar[3] * 0.15)
         end
 
+        local termNow = os.clock()
         gfx.set(termBgR, termBgG, termBgB, termBgA)
         gfx.rect(displayX, displayY, displayW, displayH, 1)
 
         gfx.set(termBorderR, termBorderG, termBorderB, termBorderA)
         gfx.rect(displayX, displayY, displayW, displayH, 0)
+        drawTerminalFx(displayX, displayY, displayW, displayH, termNow, termBorderR, termBorderG, termBorderB, termProgR, termProgG, termProgB)
 
         gfx.set(termHeaderR, termHeaderG, termHeaderB, termHeaderA)
         gfx.rect(displayX, displayY, displayW, PS(18), 1)
@@ -14668,7 +15217,7 @@ function drawMultiTrackProgressWindow()
             return res
         end
 
-        local termNow = os.clock()
+        termNow = os.clock()
         if (termNow - (multiTrackQueue.lastTerminalUpdate or 0)) > 0.5 then
             multiTrackQueue.lastTerminalUpdate = termNow
             multiTrackQueue.terminalLines = {}
@@ -14688,7 +15237,12 @@ function drawMultiTrackProgressWindow()
                     table.insert(multiTrackQueue.terminalLines, header)
                     local lines = tailFileLines(job.stdoutFile, 60)
                     for _, line in ipairs(lines) do
-                        table.insert(multiTrackQueue.terminalLines, string.format("[%d] %s", i, line))
+                        local formatted = formatProgressLine(line, i)
+                        if formatted then
+                            table.insert(multiTrackQueue.terminalLines, formatted)
+                        else
+                            table.insert(multiTrackQueue.terminalLines, string.format("[%d] %s", i, line))
+                        end
                     end
                 end
             end
@@ -14699,7 +15253,8 @@ function drawMultiTrackProgressWindow()
                     table.insert(multiTrackQueue.terminalLines, "---- Output ----")
                     local lines = tailFileLines(first.stdoutFile, 120)
                     for _, line in ipairs(lines) do
-                        table.insert(multiTrackQueue.terminalLines, line)
+                        local formatted = formatProgressLine(line, 1)
+                        table.insert(multiTrackQueue.terminalLines, formatted or line)
                     end
                 end
             end
@@ -14723,6 +15278,7 @@ function drawMultiTrackProgressWindow()
         gfx.setfont(1, "Courier", PS(9))
 
         local lineY = termContentY
+        local progressNeedle = (T("progress_label") or "Progress") .. ":"
         for i = startLine, #(multiTrackQueue.terminalLines or {}) do
             if lineY < displayY + displayH - PS(5) then
                 local line = multiTrackQueue.terminalLines[i] or ""
@@ -14735,7 +15291,7 @@ function drawMultiTrackProgressWindow()
                     gfx.set(termErrR, termErrG, termErrB, termErrA)
                 elseif line:match("warning") or line:match("Warning") then
                     gfx.set(termWarnR, termWarnG, termWarnB, termWarnA)
-                elseif line:match("PROGRESS") then
+                elseif line:match("PROGRESS") or line:find(progressNeedle, 1, true) then
                     gfx.set(termProgR, termProgG, termProgB, termProgA)
                 elseif line:match("Separating") or line:match("100%%") then
                     gfx.set(termOkR, termOkG, termOkB, termOkA)
@@ -14862,9 +15418,7 @@ function drawMultiTrackProgressWindow()
 
     local globalElapsed = os.time() - (multiTrackQueue.globalStartTime or os.time())
 
-    -- Keep the UI minimal in terminal view (like the single-track Processing window).
-    if not terminalViewActive then
-    -- Calculate stats
+    -- Calculate stats (used for info block and bottom ETA)
     local completedJobs = 0
     local activeJobs = 0
     local totalAudioDur = 0
@@ -14900,6 +15454,9 @@ function drawMultiTrackProgressWindow()
         local totalEstimate = globalElapsed * 100 / overallProgress
         eta = totalEstimate - globalElapsed
     end
+
+    -- Keep the UI minimal in terminal view (like the single-track Processing window).
+    if not terminalViewActive then
 
     gfx.setfont(1, "Arial", PS(11))
     gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
@@ -14977,8 +15534,15 @@ function drawMultiTrackProgressWindow()
     local mtTime = T("mt_time") or "Time"
     local mtSeg = T("mt_seg") or "Seg"
     local mtCancel = T("mt_cancel") or "ESC=cancel"
-    gfx.drawstr(string.format("%s: %d:%02d | %s | %s:%s | %s%s | %s",
-        tostring(mtTime), totalMins, totalSecs, SETTINGS.model or "?", tostring(mtSeg), segSize, modeStr, modeSuffix, tostring(mtCancel)))
+    local etaText = ""
+    if eta and eta > 0 then
+        local etaMins = math.floor(eta / 60)
+        local etaSecs = math.floor(eta % 60)
+        local etaLabel = T("eta_label") or "ETA:"
+        etaText = string.format(" | %s %d:%02d", tostring(etaLabel), etaMins, etaSecs)
+    end
+    gfx.drawstr(string.format("%s: %d:%02d%s | %s | %s:%s | %s%s | %s",
+        tostring(mtTime), totalMins, totalSecs, etaText, SETTINGS.model or "?", tostring(mtSeg), segSize, modeStr, modeSuffix, tostring(mtCancel)))
 
     -- flarkAUDIO logo at top (translucent) - "flark" regular, "AUDIO" bold
     gfx.setfont(1, "Arial", PS(10))
