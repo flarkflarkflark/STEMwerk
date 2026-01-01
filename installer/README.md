@@ -14,6 +14,13 @@ These are **packaging helpers** so you can download installers from GitHub and t
 The canonical release version is stored in the repo root `VERSION` file.
 For release tags, the workflow enforces: tag `vX.Y.Z` must match `VERSION`.
 
+## CI builds (GitHub Actions)
+
+- Release builds: push a tag `vX.Y.Z` to trigger `.github/workflows/release-installers.yml`.
+  - Builds installers on Windows/macOS/Linux and uploads them to the GitHub Release.
+  - Also stores the artifacts in the Actions run.
+- Manual builds: run `.github/workflows/build-installers.yml` for ad-hoc artifact-only builds.
+
 ## Install locations
 
 - Windows: `%USERPROFILE%\\Documents\\STEMwerk`

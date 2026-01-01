@@ -4,6 +4,11 @@ This file is intentionally tracked in git so "what's next" survives VS Code / Co
 
 ## Current
 
+- [ ] CI: build GitHub Actions pipeline for installers/artifacts on tag push
+- [ ] Themes: investigate user-themable UI (fonts/colors/styles) vs current look
+	- Define theme tokens (palette, fonts, sizes)
+	- Apply tokens in UI draw helpers (buttons, headers, panels)
+	- Optional: load overrides from a theme file with safe defaults
 - [ ] Processing window: investigate start delay (show immediately)
 - [x] Run pytest + i18n checks
 - [x] Verify CI workflow passes (replicated locally)

@@ -72,6 +72,28 @@ jobs:
         shell: powershell
         run: |
           choco install innosetup --no-progress -y
+          choco install imagemagick --no-progress -y
+
+      - name: Generate installer assets from SVG
+        shell: powershell
+        run: |
+          $assets = "installer\\assets"
+          New-Item -ItemType Directory -Force -Path $assets | Out-Null
+
+          $svg = Join-Path $assets "stemwerk.svg"
+          if (Test-Path $svg) {
+            $png = Join-Path $assets "stemwerk.png"
+            & magick -background none -density 220 $svg -resize 512x512 $png
+
+            $ico = Join-Path $assets "stemwerk.ico"
+            & magick $png -define icon:auto-resize=256,128,64,48,32,16 $ico
+
+            $wiz = Join-Path $assets "stemwerk-wizard.bmp"
+            & magick -size 164x314 xc:white `(` $png -resize 140x140 `)` -gravity center -composite $wiz
+
+            $wizSmall = Join-Path $assets "stemwerk-wizard-small.bmp"
+            & magick -size 55x58 xc:white `(` $png -resize 48x48 `)` -gravity center -composite $wizSmall
+          }
 
       - name: Build .exe (Inno Setup)
         shell: powershell
@@ -79,6 +101,13 @@ jobs:
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (!(Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
           & $iscc "installer\windows\STEMwerk.iss"
+
+      - name: Upload build artifacts (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-windows
+          path: installer/windows/dist/*.exe
+          if-no-files-found: error
 
       - name: Upload release asset (Windows .exe)
         uses: softprops/action-gh-release@v2
@@ -98,6 +127,13 @@ jobs:
         shell: bash
         run: |
           bash installer/macos/build_pkg.sh
+
+      - name: Upload build artifacts (macOS)
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-macos
+          path: installer/macos/dist/*.pkg
+          if-no-files-found: error
 
       - name: Upload release asset (macOS .pkg)
         uses: softprops/action-gh-release@v2
@@ -140,6 +176,17 @@ jobs:
         run: |
           bash installer/linux/build_archpkg.sh
 
+      - name: Upload build artifacts (Linux)
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-linux
+          path: |
+            installer/linux/dist/*.deb
+            installer/linux/dist/*.rpm
+            installer/linux/dist/*.AppImage
+            installer/linux/dist/*.pkg.tar.zst
+          if-no-files-found: error
+
       - name: Upload release assets (Linux)
         uses: softprops/action-gh-release@v2
         with:
@@ -149,4 +196,3 @@ jobs:
             installer/linux/dist/*.rpm
             installer/linux/dist/*.AppImage
             installer/linux/dist/*.pkg.tar.zst
-

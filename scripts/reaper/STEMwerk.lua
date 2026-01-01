@@ -3,7 +3,7 @@ function debugLog(msg) end
 function clearDebugLog() end
 -- @description Stemwerk: Main
 -- @author flarkAUDIO
--- @version 2.1.4
+-- @version 2.1.5
 -- @changelog
 --   2025-12-26: Glossy UI buttons + text shadow, KITT LED FX tweaks, playhead stays put while playing.
 --   v2.0.0: i18n support + UI polish + device selection
@@ -428,7 +428,7 @@ local STEMS = {
 }
 
 -- App version (single source of truth)
-local APP_VERSION = "2.1.4"
+local APP_VERSION = "2.1.5"
 
 -- Forward declarations (these are defined later in the file, but used by early helpers)
 local SETTINGS
