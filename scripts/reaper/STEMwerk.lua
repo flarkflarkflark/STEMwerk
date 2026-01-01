@@ -5,6 +5,7 @@ function clearDebugLog() end
 -- @author flarkAUDIO
 -- @version 2.1.4
 -- @changelog
+--   2025-12-26: Glossy UI buttons + text shadow, KITT LED FX tweaks, playhead stays put while playing.
 --   v2.0.0: i18n support + UI polish + device selection
 --   v1.0.0: Initial release
 -- @provides
@@ -432,6 +433,8 @@ local APP_VERSION = "2.1.4"
 -- Forward declarations (these are defined later in the file, but used by early helpers)
 local SETTINGS
 local saveSettings
+local drawGlossyPill
+local drawGlossyRect
 
 -- Available processing devices
 local DEVICES = {
@@ -861,8 +864,7 @@ function startRuntimeDeviceProbeAsync(force)
 
         local function escPS(s)
             s = tostring(s or "")
-            s = s:gsub("`", "``")
-            s = s:gsub('"', '""')
+            s = s:gsub("'", "''")
             return s
         end
 
@@ -873,9 +875,11 @@ function startRuntimeDeviceProbeAsync(force)
             "$done='" .. escPS(doneFile) .. "';" ..
             "$py='" .. escPS(PYTHON_PATH) .. "';" ..
             "$sep='" .. escPS(SEPARATOR_SCRIPT) .. "';" ..
+            "$dq=[char]34;" ..
+            "$sepq=$dq + $sep + $dq;" ..
             -- Use Start-Process to ensure proper quoting and redirection on Windows
-            " $p = Start-Process -FilePath $py -ArgumentList @('-u',$sep,'--list-devices-machine') -NoNewWindow -Wait -RedirectStandardOutput $out -RedirectStandardError $out -PassThru; $rc = $p.ExitCode;" ..
-            " if ($rc -ne 0) { $p = Start-Process -FilePath $py -ArgumentList @('-u',$sep,'--list-devices') -NoNewWindow -Wait -RedirectStandardOutput $out -RedirectStandardError $out -PassThru; $rc = $p.ExitCode };" ..
+            " $p = Start-Process -FilePath $py -ArgumentList @('-u',$sepq,'--list-devices-machine') -NoNewWindow -Wait -RedirectStandardOutput $out -RedirectStandardError $out -PassThru; $rc = $p.ExitCode;" ..
+            " if ($rc -ne 0) { $p = Start-Process -FilePath $py -ArgumentList @('-u',$sepq,'--list-devices') -NoNewWindow -Wait -RedirectStandardOutput $out -RedirectStandardError $out -PassThru; $rc = $p.ExitCode };" ..
             " Set-Content -Path $rcfile -Value $rc -Encoding ascii;" ..
             " Set-Content -Path $done -Value 'DONE' -Encoding ascii;" ..
             " Try { Copy-Item -Path $out -Destination '" .. escPS(script_path .. "probe_out_last.txt") .. "' -Force } Catch {};" ..
@@ -5067,7 +5071,7 @@ local function drawArtGallery()
         gfx.set(1, 1, 1, textAlpha)
         local textW = gfx.measurestr(tab)
         gfx.x = tabX + (tabWidths[i] - textW) / 2
-        gfx.y = tabY + (tabH - UI(11)) / 2
+        gfx.y = tabY + (tabH - gfx.texth) / 2
         gfx.drawstr(tab)
 
         -- Check click (only if controls are visible enough)
@@ -7018,28 +7022,25 @@ local function drawArtGallery()
     local btnY = h - UI(32)
     local closeHover = mx >= btnX and mx <= btnX + btnW and my >= btnY and my <= btnY + btnH
 
+    local backR, backG, backB = 0.5, 0.2, 0.2
     if closeHover then
-        gfx.set(0.9, 0.3, 0.3, 1 * controlsOpacity)
-    else
-        gfx.set(0.5, 0.2, 0.2, 0.9 * controlsOpacity)
+        backR, backG, backB = 0.9, 0.3, 0.3
     end
-    -- Rounded button
-    for i = 0, btnH - 1 do
-        local radius = btnH / 2
-        local inset = 0
-        if i < radius then
-            inset = radius - math.sqrt(math.max(0, radius * radius - (radius - i) * (radius - i)))
-        elseif i > btnH - radius then
-            inset = radius - math.sqrt(math.max(0, radius * radius - (i - (btnH - radius)) * (i - (btnH - radius))))
-        end
-        gfx.line(btnX + inset, btnY + i, btnX + btnW - inset, btnY + i)
-    end
-    gfx.set(1, 1, 1, 1 * controlsOpacity)
+    drawGlossyPill(btnX, btnY, btnW, btnH, backR, backG, backB, controlsOpacity)
     gfx.setfont(1, "Arial", UI(11), string.byte('b'))
     local closeText = T("back")
     local closeTextW = gfx.measurestr(closeText)
-    gfx.x = btnX + (btnW - closeTextW) / 2
-    gfx.y = btnY + (btnH - UI(11)) / 2
+    local backX = btnX + (btnW - closeTextW) / 2
+    local backY = btnY + (btnH - gfx.texth) / 2
+    gfx.set(0, 0, 0, 0.4 * controlsOpacity)
+    gfx.x, gfx.y = backX + 2, backY + 2; gfx.drawstr(closeText)
+    gfx.set(0, 0, 0, 0.6 * controlsOpacity)
+    gfx.x, gfx.y = backX + 1, backY + 1; gfx.drawstr(closeText)
+    gfx.x, gfx.y = backX - 1, backY + 1; gfx.drawstr(closeText)
+    gfx.x, gfx.y = backX + 1, backY - 1; gfx.drawstr(closeText)
+    gfx.x, gfx.y = backX - 1, backY - 1; gfx.drawstr(closeText)
+    gfx.set(1, 1, 1, 1 * controlsOpacity)
+    gfx.x, gfx.y = backX, backY
     gfx.drawstr(closeText)
 
     -- Close button tooltip
@@ -7714,7 +7715,7 @@ local function drawMessageWindow()
     local helpText = T("help")
     local helpTextW = gfx.measurestr(helpText)
     gfx.x = helpBtnX + (btnW - helpTextW) / 2
-    gfx.y = btnY + (btnH - PS(13)) / 2
+    gfx.y = btnY + (btnH - gfx.texth) / 2
     gfx.drawstr(helpText)
 
     -- Help button tooltip
@@ -7751,7 +7752,7 @@ local function drawMessageWindow()
     local closeText = T("close")
     local closeW = gfx.measurestr(closeText)
     gfx.x = btnX + (btnW - closeW) / 2
-    gfx.y = btnY + (btnH - PS(13)) / 2
+    gfx.y = btnY + (btnH - gfx.texth) / 2
     gfx.drawstr(closeText)
 
     -- Close button tooltip
@@ -8478,28 +8479,40 @@ local function drawCheckbox(x, y, checked, label, r, g, b, fixedW, fontSizeOverr
         if not GUI.wasMouseDown then clicked = true end
     end
 
-    -- Background color based on checked state
+    local baseR, baseG, baseB
     if checked then
         local mult = hover and 1.2 or 1.0
-        gfx.set(r/255 * mult, g/255 * mult, b/255 * mult, 1)
+        baseR = (r or 0) / 255 * mult
+        baseG = (g or 0) / 255 * mult
+        baseB = (b or 0) / 255 * mult
     else
         local brightness = hover and 0.35 or 0.25
-        gfx.set(brightness, brightness, brightness, 1)
+        baseR, baseG, baseB = brightness, brightness, brightness
     end
-    gfx.rect(x, y, boxW, boxH, 1)
+    drawGlossyRect(x, y, boxW, boxH, baseR, baseG, baseB, 1)
 
     -- Border
     gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
     gfx.rect(x, y, boxW, boxH, 0)
 
     -- Text - white for contrast
-    gfx.set(1, 1, 1, 1)
+    local textAlpha = checked and 1 or (hover and 0.95 or 0.85)
     local baseFontSize = fontSizeOverride or S(13)
     local minFontSize = S(9)
     local padding = S(4)
     local labelText, tw, usedFontSize = fitTextToBox(label, boxW - padding * 2, baseFontSize, minFontSize)
-    gfx.x = x + (boxW - tw) / 2
-    gfx.y = y + (boxH - usedFontSize) / 2
+    local textX = x + (boxW - tw) / 2
+    local textH = gfx.texth
+    local textY = y + (boxH - textH) / 2
+    gfx.set(0, 0, 0, 0.35 * textAlpha)
+    gfx.x, gfx.y = textX + 2, textY + 2; gfx.drawstr(labelText)
+    gfx.set(0, 0, 0, 0.55 * textAlpha)
+    gfx.x, gfx.y = textX + 1, textY + 1; gfx.drawstr(labelText)
+    gfx.x, gfx.y = textX - 1, textY + 1; gfx.drawstr(labelText)
+    gfx.x, gfx.y = textX + 1, textY - 1; gfx.drawstr(labelText)
+    gfx.x, gfx.y = textX - 1, textY - 1; gfx.drawstr(labelText)
+    gfx.set(1, 1, 1, textAlpha)
+    gfx.x, gfx.y = textX, textY
     gfx.drawstr(labelText)
 
     if usedFontSize ~= baseFontSize then
@@ -8834,6 +8847,95 @@ function buildResultMessageLines()
     return lines
 end
 
+drawGlossyPill = function(x, y, w, h, baseR, baseG, baseB, baseA)
+    baseA = baseA or 1
+    local radius = h / 2
+    local function drawPillLineAt(i)
+        local inset = 0
+        if i < radius then
+            inset = radius - math.sqrt(radius * radius - (radius - i) * (radius - i))
+        elseif i > h - radius then
+            inset = radius - math.sqrt(radius * radius - (i - (h - radius)) * (i - (h - radius)))
+        end
+        gfx.line(x + inset, y + i, x + w - inset, y + i)
+    end
+
+    gfx.set(baseR, baseG, baseB, baseA)
+    for i = 0, h - 1 do
+        drawPillLineAt(i)
+    end
+
+    local hiR = math.min(1, baseR + 0.3)
+    local hiG = math.min(1, baseG + 0.3)
+    local hiB = math.min(1, baseB + 0.3)
+    local highlightH = math.max(1, math.floor(h * 0.42))
+    for i = 0, highlightH - 1 do
+        local t = 1 - (i / math.max(1, highlightH - 1))
+        gfx.set(hiR, hiG, hiB, 0.25 * t * baseA)
+        drawPillLineAt(i)
+    end
+
+    local bandY = math.floor(h * 0.18)
+    local bandH = math.max(1, math.floor(h * 0.22))
+    for i = 0, bandH - 1 do
+        local t = 1 - (i / math.max(1, bandH - 1))
+        gfx.set(1, 1, 1, 0.12 * t * baseA)
+        drawPillLineAt(bandY + i)
+    end
+
+    local shR, shG, shB = baseR * 0.6, baseG * 0.6, baseB * 0.6
+    local shadowH = math.max(1, math.floor(h * 0.35))
+    for i = 0, shadowH - 1 do
+        local t = i / math.max(1, shadowH - 1)
+        gfx.set(shR, shG, shB, 0.18 * t * baseA)
+        drawPillLineAt(h - 1 - i)
+    end
+
+    local innerR, innerG, innerB = baseR * 0.7, baseG * 0.7, baseB * 0.7
+    for i = 0, h - 1 do
+        if i < 2 or i > h - 3 then
+            gfx.set(innerR, innerG, innerB, 0.2 * baseA)
+            drawPillLineAt(i)
+        end
+    end
+end
+
+drawGlossyRect = function(x, y, w, h, baseR, baseG, baseB, baseA)
+    baseA = baseA or 1
+    gfx.set(baseR, baseG, baseB, baseA)
+    gfx.rect(x, y, w, h, 1)
+
+    local hiR = math.min(1, baseR + 0.3)
+    local hiG = math.min(1, baseG + 0.3)
+    local hiB = math.min(1, baseB + 0.3)
+    local highlightH = math.max(1, math.floor(h * 0.42))
+    for i = 0, highlightH - 1 do
+        local t = 1 - (i / math.max(1, highlightH - 1))
+        gfx.set(hiR, hiG, hiB, 0.25 * t * baseA)
+        gfx.rect(x, y + i, w, 1, 1)
+    end
+
+    local bandY = math.floor(h * 0.18)
+    local bandH = math.max(1, math.floor(h * 0.22))
+    for i = 0, bandH - 1 do
+        local t = 1 - (i / math.max(1, bandH - 1))
+        gfx.set(1, 1, 1, 0.12 * t * baseA)
+        gfx.rect(x, y + bandY + i, w, 1, 1)
+    end
+
+    local shR, shG, shB = baseR * 0.6, baseG * 0.6, baseB * 0.6
+    local shadowH = math.max(1, math.floor(h * 0.35))
+    for i = 0, shadowH - 1 do
+        local t = i / math.max(1, shadowH - 1)
+        gfx.set(shR, shG, shB, 0.18 * t * baseA)
+        gfx.rect(x, y + (h - 1 - i), w, 1, 1)
+    end
+
+    gfx.set(baseR * 0.7, baseG * 0.7, baseB * 0.7, 0.2 * baseA)
+    gfx.rect(x, y, w, 1, 1)
+    gfx.rect(x, y + h - 1, w, 1, 1)
+end
+
 -- Draw a radio button as a toggle box (like stems/presets) and return if it was clicked (scaled)
 -- Optional fixedW parameter to set a fixed width for all boxes
 -- Optional attentionMult: when not selected, draw a subtle accent pulse (used to hint "direct tool" availability)
@@ -8861,27 +8963,28 @@ local function drawRadio(x, y, selected, label, color, fixedW, attentionMult, ic
     end
 
     -- Background color based on selected state
+    local baseR, baseG, baseB, baseA
     if selected then
         local mult = hover and 1.2 or 1.0
-        gfx.set(r/255 * mult, g/255 * mult, b/255 * mult, 1)
+        baseR, baseG, baseB, baseA = r / 255 * mult, g / 255 * mult, b / 255 * mult, 1
     else
         if attentionMult and attentionMult > 0 then
             local base = hover and 0.55 or 0.45
-            local a = math.min(0.9, math.max(0.25, base * attentionMult))
-            gfx.set(r/255, g/255, b/255, a)
+            baseA = math.min(0.9, math.max(0.25, base * attentionMult))
+            baseR, baseG, baseB = r / 255, g / 255, b / 255
         else
             local brightness = hover and 0.35 or 0.25
-            gfx.set(brightness, brightness, brightness, 1)
+            baseR, baseG, baseB, baseA = brightness, brightness, brightness, 1
         end
     end
-    gfx.rect(x, y, boxW, boxH, 1)
+    drawGlossyRect(x, y, boxW, boxH, baseR, baseG, baseB, baseA)
 
     -- Border
     gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 1)
     gfx.rect(x, y, boxW, boxH, 0)
 
     -- Text - white for contrast
-    gfx.set(1, 1, 1, 1)
+    local textAlpha = selected and 1 or (hover and 0.95 or 0.85)
 
     local baseFontSize = fontSizeOverride or S(13)
     local minFontSize = S(9)
@@ -8902,10 +9005,18 @@ local function drawRadio(x, y, selected, label, color, fixedW, attentionMult, ic
         -- Reserve space on the left for the icon so text never overlaps it.
         local reservedLeft = S(5) + size + S(8)
         local labelText, tw, usedFontSize = fitTextToBox(label, boxW - reservedLeft - padding, baseFontSize, minFontSize)
-        gfx.set(1, 1, 1, 1)
         -- Right align label against the right edge of the box.
-        gfx.x = x + boxW - padding - tw
-        gfx.y = y + S(2)
+        local labelX = x + boxW - padding - tw
+        local labelY = y + S(2)
+        gfx.set(0, 0, 0, 0.35 * textAlpha)
+        gfx.x, gfx.y = labelX + 2, labelY + 2; gfx.drawstr(labelText)
+        gfx.set(0, 0, 0, 0.55 * textAlpha)
+        gfx.x, gfx.y = labelX + 1, labelY + 1; gfx.drawstr(labelText)
+        gfx.x, gfx.y = labelX - 1, labelY + 1; gfx.drawstr(labelText)
+        gfx.x, gfx.y = labelX + 1, labelY - 1; gfx.drawstr(labelText)
+        gfx.x, gfx.y = labelX - 1, labelY - 1; gfx.drawstr(labelText)
+        gfx.set(1, 1, 1, textAlpha)
+        gfx.x, gfx.y = labelX, labelY
         gfx.drawstr(labelText)
 
         if usedFontSize ~= baseFontSize then
@@ -8966,8 +9077,18 @@ local function drawRadio(x, y, selected, label, color, fixedW, attentionMult, ic
     else
         -- Default centered label
         local labelText, tw, usedFontSize = fitTextToBox(label, boxW - padding * 2, baseFontSize, minFontSize)
-        gfx.x = x + (boxW - tw) / 2
-        gfx.y = y + (boxH - usedFontSize) / 2
+        local textX = x + (boxW - tw) / 2
+        local textH = gfx.texth
+    local textY = y + (boxH - textH) / 2
+        gfx.set(0, 0, 0, 0.35 * textAlpha)
+        gfx.x, gfx.y = textX + 2, textY + 2; gfx.drawstr(labelText)
+        gfx.set(0, 0, 0, 0.55 * textAlpha)
+        gfx.x, gfx.y = textX + 1, textY + 1; gfx.drawstr(labelText)
+        gfx.x, gfx.y = textX - 1, textY + 1; gfx.drawstr(labelText)
+        gfx.x, gfx.y = textX + 1, textY - 1; gfx.drawstr(labelText)
+        gfx.x, gfx.y = textX - 1, textY - 1; gfx.drawstr(labelText)
+        gfx.set(1, 1, 1, textAlpha)
+        gfx.x, gfx.y = textX, textY
         gfx.drawstr(labelText)
 
         if usedFontSize ~= baseFontSize then
@@ -9030,6 +9151,12 @@ local function stripExplodePrefix(label)
     label = label:gsub("^%s*[Ee]xplodieren%s+", "")  -- DE: Explodieren ..
     label = label:gsub("^%s*[Ee]xploser%s+", "")     -- FR: Exploser ..
     label = label:gsub("^%s*[Ee]xplotar%s+", "")     -- ES: Explotar ..
+    label = label:gsub("\226\134\146", "->")
+    label = label:gsub("\226\158\156", "->")
+    label = label:gsub("\226\158\148", "->")
+    label = label:gsub("\226\158\161", "->")
+    label = label:gsub("\226\158\158", "->")
+    label = label:gsub("\226\158\164", "->")
     return label
 end
 
@@ -9148,17 +9275,17 @@ local function drawToggleButton(x, y, w, h, label, selected, color, fontSizeOver
         if not GUI.wasMouseDown then clicked = true end
     end
 
-    -- Background color based on selected state
+    local baseR, baseG, baseB
     if selected then
-        -- Selected: use the stem color
         local mult = hover and 1.2 or 1.0
-        gfx.set(color[1]/255 * mult, color[2]/255 * mult, color[3]/255 * mult, 1)
+        baseR = (color[1] or 0) / 255 * mult
+        baseG = (color[2] or 0) / 255 * mult
+        baseB = (color[3] or 0) / 255 * mult
     else
-        -- Not selected: dim gray
         local brightness = hover and 0.35 or 0.25
-        gfx.set(brightness, brightness, brightness, 1)
+        baseR, baseG, baseB = brightness, brightness, brightness
     end
-    gfx.rect(x, y, w, h, 1)
+    drawGlossyRect(x, y, w, h, baseR, baseG, baseB, 1)
 
     -- Border - brighter when selected
     if selected then
@@ -9170,17 +9297,23 @@ local function drawToggleButton(x, y, w, h, label, selected, color, fontSizeOver
 
     -- Button text
     -- Keep text readable even when unselected; match Output column readability.
-    if selected then
-        gfx.set(1, 1, 1, 1)
-    else
-        gfx.set(1, 1, 1, hover and 0.9 or 0.75)
-    end
+    local textAlpha = selected and 1 or (hover and 0.9 or 0.75)
     local baseFontSize = fontSizeOverride or S(13)
     local minFontSize = S(9)
     local padding = S(4)
     local labelText, tw, usedFontSize = fitTextToBox(label, w - padding * 2, baseFontSize, minFontSize)
-    gfx.x = x + (w - tw) / 2
-    gfx.y = y + (h - usedFontSize) / 2
+    local textX = x + (w - tw) / 2
+    local textH = gfx.texth
+    local textY = y + (h - textH) / 2
+    gfx.set(0, 0, 0, 0.35 * textAlpha)
+    gfx.x, gfx.y = textX + 2, textY + 2; gfx.drawstr(labelText)
+    gfx.set(0, 0, 0, 0.55 * textAlpha)
+    gfx.x, gfx.y = textX + 1, textY + 1; gfx.drawstr(labelText)
+    gfx.x, gfx.y = textX - 1, textY + 1; gfx.drawstr(labelText)
+    gfx.x, gfx.y = textX + 1, textY - 1; gfx.drawstr(labelText)
+    gfx.x, gfx.y = textX - 1, textY - 1; gfx.drawstr(labelText)
+    gfx.set(1, 1, 1, textAlpha)
+    gfx.x, gfx.y = textX, textY
     gfx.drawstr(labelText)
 
     if usedFontSize ~= baseFontSize then
@@ -9205,47 +9338,47 @@ local function drawButton(x, y, w, h, label, isDefault, color, fontSizeOverride)
         if not GUI.wasMouseDown then clicked = true end
     end
 
+    local baseR, baseG, baseB
     if color then
-        -- Custom color provided (e.g., preset buttons)
         local mult = hover and 1.2 or 1.0
-        gfx.set(color[1]/255 * mult, color[2]/255 * mult, color[3]/255 * mult, 1)
+        baseR = (color[1] or 0) / 255 * mult
+        baseG = (color[2] or 0) / 255 * mult
+        baseB = (color[3] or 0) / 255 * mult
     else
-        -- Use theme colors
         if isDefault then
             if hover then
-                gfx.set(THEME.buttonPrimaryHover[1], THEME.buttonPrimaryHover[2], THEME.buttonPrimaryHover[3], 1)
+                baseR, baseG, baseB = THEME.buttonPrimaryHover[1], THEME.buttonPrimaryHover[2], THEME.buttonPrimaryHover[3]
             else
-                gfx.set(THEME.buttonPrimary[1], THEME.buttonPrimary[2], THEME.buttonPrimary[3], 1)
+                baseR, baseG, baseB = THEME.buttonPrimary[1], THEME.buttonPrimary[2], THEME.buttonPrimary[3]
             end
         else
             if hover then
-                gfx.set(THEME.buttonHover[1], THEME.buttonHover[2], THEME.buttonHover[3], 1)
+                baseR, baseG, baseB = THEME.buttonHover[1], THEME.buttonHover[2], THEME.buttonHover[3]
             else
-                gfx.set(THEME.button[1], THEME.button[2], THEME.button[3], 1)
+                baseR, baseG, baseB = THEME.button[1], THEME.button[2], THEME.button[3]
             end
         end
     end
 
-    -- Draw rounded (pill-shaped) button background
-    for i = 0, h - 1 do
-        local radius = h / 2
-        local inset = 0
-        if i < radius then
-            inset = radius - math.sqrt(radius * radius - (radius - i) * (radius - i))
-        elseif i > h - radius then
-            inset = radius - math.sqrt(radius * radius - (i - (h - radius)) * (i - (h - radius)))
-        end
-        gfx.line(x + inset, y + i, x + w - inset, y + i)
-    end
+    drawGlossyPill(x, y, w, h, baseR, baseG, baseB)
 
     -- Button text - always white for good contrast on colored buttons
-    gfx.set(1, 1, 1, 1)
     local baseFontSize = fontSizeOverride or S(13)
     local minFontSize = S(9)
     local padding = S(4)
     local labelText, tw, usedFontSize = fitTextToBox(label, w - padding * 2, baseFontSize, minFontSize)
-    gfx.x = x + (w - tw) / 2
-    gfx.y = y + (h - usedFontSize) / 2
+    local textX = x + (w - tw) / 2
+    local textH = gfx.texth
+    local textY = y + (h - textH) / 2
+    gfx.set(0, 0, 0, 0.4)
+    gfx.x, gfx.y = textX + 2, textY + 2; gfx.drawstr(labelText)
+    gfx.set(0, 0, 0, 0.6)
+    gfx.x, gfx.y = textX + 1, textY + 1; gfx.drawstr(labelText)
+    gfx.x, gfx.y = textX - 1, textY + 1; gfx.drawstr(labelText)
+    gfx.x, gfx.y = textX + 1, textY - 1; gfx.drawstr(labelText)
+    gfx.x, gfx.y = textX - 1, textY - 1; gfx.drawstr(labelText)
+    gfx.set(1, 1, 1, 1)
+    gfx.x, gfx.y = textX, textY
     gfx.drawstr(labelText)
 
     if usedFontSize ~= baseFontSize then
@@ -10427,12 +10560,12 @@ local function dialogLoop()
     local stemBtnW = S(70)  -- Same width as Cancel button
 
     -- Status bar (3 lines): each line in its own translucent block, pinned to bottom
-    local statusFontSize = S(8)
+    local statusFontSize = S(9)
     local statusPadX = S(10)
     local statusBlockPadY = S(1)
     local statusBlockGap = S(1)
-    local statusBlockAlpha = 0.55
-    local statusBlockBorderAlpha = 0.6
+    local statusBlockAlpha = 0.7
+    local statusBlockBorderAlpha = 0.75
 
     gfx.setfont(1, "Arial", statusFontSize)
     local statusLineH = gfx.texth
@@ -10589,17 +10722,7 @@ local function dialogLoop()
     local stemBtnColor = stemBtnHover and THEME.buttonPrimaryHover or THEME.buttonPrimary
 
     -- Draw button background
-    gfx.set(stemBtnColor[1], stemBtnColor[2], stemBtnColor[3], 1)
-    for i = 0, btnH - 1 do
-        local radius = btnH / 2
-        local inset = 0
-        if i < radius then
-            inset = radius - math.sqrt(radius * radius - (radius - i) * (radius - i))
-        elseif i > btnH - radius then
-            inset = radius - math.sqrt(radius * radius - (i - (btnH - radius)) * (i - (btnH - radius)))
-        end
-        gfx.line(stemBtnX + inset, footerRow4Y + i, stemBtnX + stemBtnW - inset, footerRow4Y + i)
-    end
+    drawGlossyPill(stemBtnX, footerRow4Y, stemBtnW, btnH, stemBtnColor[1], stemBtnColor[2], stemBtnColor[3])
 
     -- Draw "STEMwerk" with colored STEM letters
     gfx.setfont(1, "Arial", S(13), string.byte('b'))
@@ -10623,6 +10746,22 @@ local function dialogLoop()
         {150/255, 100/255, 255/255},  -- E = Bass (purple)
         {100/255, 255/255, 150/255},  -- M = Other (green)
     }
+
+    -- Thin outline for readability (like Close button)
+    local offsets = {
+        {1, 1}, {-1, 1}, {1, -1}, {-1, -1},
+    }
+    for _, off in ipairs(offsets) do
+        local ox = textX + off[1]
+        local oy = textY + off[2]
+        gfx.set(0, 0, 0, 0.6)
+        for i, letter in ipairs(letters) do
+            gfx.x = ox
+            gfx.y = oy
+            gfx.drawstr(letter)
+            ox = ox + letterWidths[i]
+        end
+    end
 
     for i, letter in ipairs(letters) do
         if i <= 4 then
@@ -10670,29 +10809,27 @@ local function dialogLoop()
     local closeBtnHover = mx >= closeBtnX and mx <= closeBtnX + closeBtnW and my >= footerRow4Y and my <= footerRow4Y + btnH
 
     -- Red button color
+    local closeR, closeG, closeB = 0.7, 0.2, 0.2
     if closeBtnHover then
-        gfx.set(0.9, 0.3, 0.3, 1)
-    else
-        gfx.set(0.7, 0.2, 0.2, 1)
+        closeR, closeG, closeB = 0.9, 0.3, 0.3
     end
     -- Draw rounded (pill-shaped) button
-    for i = 0, btnH - 1 do
-        local radius = btnH / 2
-        local inset = 0
-        if i < radius then
-            inset = radius - math.sqrt(radius * radius - (radius - i) * (radius - i))
-        elseif i > btnH - radius then
-            inset = radius - math.sqrt(radius * radius - (i - (btnH - radius)) * (i - (btnH - radius)))
-        end
-        gfx.line(closeBtnX + inset, footerRow4Y + i, closeBtnX + closeBtnW - inset, footerRow4Y + i)
-    end
+    drawGlossyPill(closeBtnX, footerRow4Y, closeBtnW, btnH, closeR, closeG, closeB)
 
-    gfx.set(1, 1, 1, 1)
     gfx.setfont(1, "Arial", S(13), string.byte('b'))
     local closeText = T("close") or "Close"
     local closeTextW = gfx.measurestr(closeText)
-    gfx.x = closeBtnX + (closeBtnW - closeTextW) / 2
-    gfx.y = footerRow4Y + (btnH - S(13)) / 2
+    local closeTextX = closeBtnX + (closeBtnW - closeTextW) / 2
+    local closeTextY = footerRow4Y + (btnH - gfx.texth) / 2
+    gfx.set(0, 0, 0, 0.4)
+    gfx.x, gfx.y = closeTextX + 2, closeTextY + 2; gfx.drawstr(closeText)
+    gfx.set(0, 0, 0, 0.6)
+    gfx.x, gfx.y = closeTextX + 1, closeTextY + 1; gfx.drawstr(closeText)
+    gfx.x, gfx.y = closeTextX - 1, closeTextY + 1; gfx.drawstr(closeText)
+    gfx.x, gfx.y = closeTextX + 1, closeTextY - 1; gfx.drawstr(closeText)
+    gfx.x, gfx.y = closeTextX - 1, closeTextY - 1; gfx.drawstr(closeText)
+    gfx.set(1, 1, 1, 1)
+    gfx.x, gfx.y = closeTextX, closeTextY
     gfx.drawstr(closeText)
 
     -- Handle Close button click
@@ -11512,7 +11649,7 @@ local function renderTimeSelectionToWav(outputPath)
 end
 
 -- Extract audio for a specific track within time selection
-local function renderTrackTimeSelectionToWav(track, outputPath)
+function renderTrackTimeSelectionToWav(track, outputPath)
     local startTime, endTime = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
     if startTime >= endTime then return nil, "No time selection" end
 
@@ -11576,7 +11713,7 @@ end
 
 -- Render selected items on a track to WAV (no time selection needed)
 -- Used when items are selected but no time selection exists
-local function renderTrackSelectedItemsToWav(track, outputPath)
+function renderTrackSelectedItemsToWav(track, outputPath)
     -- Find ALL selected items on this track
     local numItems = reaper.CountTrackMediaItems(track)
     local foundItem = nil
@@ -11610,7 +11747,7 @@ local function renderTrackSelectedItemsToWav(track, outputPath)
 end
 
 -- Render a single item to WAV (for in-place multi-item processing)
-local function renderSingleItemToWav(item, outputPath)
+function renderSingleItemToWav(item, outputPath)
     if not item or not reaper.ValidatePtr(item, "MediaItem*") then
         return nil, "Invalid item"
     end
@@ -11750,7 +11887,7 @@ local function drawTerminalFx(x, y, w, h, now, borderR, borderG, borderB, progR,
     local barW = math.max(px(28), 14)
     local pad = px(4)
     local span = math.max(1, w - (pad * 2) - barW)
-    local cycle = 0.18
+    local cycle = 0.72
     local theta = now * cycle * (math.pi * 2)
     local smooth = (1 - math.cos(theta)) * 0.5
     local velocity = math.sin(theta)
@@ -11760,27 +11897,56 @@ local function drawTerminalFx(x, y, w, h, now, borderR, borderG, borderB, progR,
     local ledH = barH * (1 + 0.12 * squash)
     local ledX = x + pad + (span * smooth) + (barW - ledW) * 0.5
     local ledY = y + h - pad - ledH
-    gfx.set(progR or 1, progG or 1, progB or 1, SETTINGS.darkMode and 0.55 or 0.5)
+    local glowW = ledW * 1.6
+    local glowH = ledH * 1.6
+    local glowX = ledX - (glowW - ledW) * 0.5
+    local glowY = ledY - (glowH - ledH) * 0.5
+    local ledR = progR or 1
+    local ledG = progG or 1
+    local ledB = progB or 1
+    local lum = (ledR * 0.2126) + (ledG * 0.7152) + (ledB * 0.0722)
+    local hot = math.max(0, math.min(1, (0.55 - lum) * 1.6))
+    gfx.set(ledR, ledG, ledB, SETTINGS.darkMode and 0.18 or 0.12)
+    gfx.rect(glowX, glowY, glowW, glowH, 1)
+
+    gfx.set(ledR, ledG, ledB, SETTINGS.darkMode and 0.7 or 0.6)
     gfx.rect(ledX, ledY, ledW, ledH, 1)
 
-    local tailScale = math.min(1, math.abs(velocity) * 1.25) * (1 - 0.35 * squash)
-    local tail1, tail2, tail3 = px(10) * tailScale, px(20) * tailScale, px(30) * tailScale
+    local coreW = ledW * 0.55
+    local coreH = ledH * 0.55
+    local coreX = ledX + (ledW - coreW) * 0.5
+    local coreY = ledY + (ledH - coreH) * 0.5
+    local coreR = ledR + (1 - ledR) * (hot * 0.75)
+    local coreG = ledG + (1 - ledG) * (hot * 0.75)
+    local coreB = ledB + (1 - ledB) * (hot * 0.75)
+    gfx.set(coreR, coreG, coreB, SETTINGS.darkMode and 0.85 or 0.8)
+    gfx.rect(coreX, coreY, coreW, coreH, 1)
+    gfx.set(ledR, ledG, ledB, SETTINGS.darkMode and 0.25 or 0.2)
+    gfx.rect(ledX + 1, ledY + 1, ledW - 2, 1, 1)
+
+    local tailScale = math.min(1, math.abs(velocity) * 1.6) * (1 - 0.25 * squash)
+    local tail1, tail2, tail3, tail4 = px(16) * tailScale, px(30) * tailScale, px(44) * tailScale, px(60) * tailScale
     local tailDir = velocity >= 0 and -1 or 1
 
     local tailX = (tailDir == -1) and (ledX - tail1) or ledX
     local tailW = ledW + tail1
-    gfx.set(progR or 1, progG or 1, progB or 1, SETTINGS.darkMode and 0.28 or 0.2)
+    gfx.set(ledR, ledG, ledB, SETTINGS.darkMode and 0.32 or 0.24)
     gfx.rect(tailX, ledY, tailW, ledH, 1)
 
     tailX = (tailDir == -1) and (ledX - tail2) or ledX
     tailW = ledW + tail2
-    gfx.set(progR or 1, progG or 1, progB or 1, SETTINGS.darkMode and 0.18 or 0.12)
+    gfx.set(ledR, ledG, ledB, SETTINGS.darkMode and 0.22 or 0.16)
     gfx.rect(tailX, ledY, tailW, ledH, 1)
 
     tailX = (tailDir == -1) and (ledX - tail3) or ledX
     tailW = ledW + tail3
-    gfx.set(progR or 1, progG or 1, progB or 1, SETTINGS.darkMode and 0.1 or 0.07)
-    gfx.rect(tailX, ledY + 1, tailW, 1, 1)
+    gfx.set(ledR, ledG, ledB, SETTINGS.darkMode and 0.14 or 0.1)
+    gfx.rect(tailX, ledY + 1, tailW, ledH - 1, 1)
+
+    tailX = (tailDir == -1) and (ledX - tail4) or ledX
+    tailW = ledW + tail4
+    gfx.set(ledR, ledG, ledB, SETTINGS.darkMode and 0.09 or 0.06)
+    gfx.rect(tailX, ledY + 2, tailW, 1, 1)
 end
 
 -- Progress window resizable flag
@@ -12380,6 +12546,11 @@ local function drawProgressWindow()
                 termHeaderA = 1
             end
 
+            -- Match the LED/progress tint to the active track color when available.
+            if progressState.uiColor and type(progressState.uiColor) == "table" then
+                termProgR, termProgG, termProgB = progressState.uiColor[1] or termProgR, progressState.uiColor[2] or termProgG, progressState.uiColor[3] or termProgB
+            end
+
             -- Dark terminal background
             gfx.set(termBgR, termBgG, termBgB, termBgA)
             gfx.rect(displayX, displayY, displayW, displayH, 1)
@@ -12538,8 +12709,8 @@ local function drawProgressWindow()
     local statusFontSize = PS(9)
     local statusPadX = PS(10)
     local statusBlockPadY = PS(2)
-    local statusBlockAlpha = 0.55
-    local statusBlockBorderAlpha = 0.6
+    local statusBlockAlpha = 0.7
+    local statusBlockBorderAlpha = 0.75
     gfx.setfont(1, "Arial", statusFontSize)
     local statusLineH = gfx.texth
     local statusBlockH = statusLineH + statusBlockPadY * 2
@@ -12773,20 +12944,40 @@ local function startSeparationProcess(inputFile, outputDir, model)
         local vbsPath = outputDir .. PATH_SEP .. "run_hidden.vbs"
         local vbsFile = io.open(vbsPath, "w")
         if vbsFile then
-            local function q(s) return tostring(s or "") end
-            local python = q(PYTHON_PATH)
-            local sep = q(SEPARATOR_SCRIPT)
-            local inF = q(inputFile)
-            local outD = q(outputDir)
-            local m = tostring(model)
-            local dev = tostring(deviceArg)
-            local stdoutF = stdoutFile
-            local stderrF = logFile
-            local pidF = pidFile
-            local doneF = doneFile
+            local function escPS(s)
+                s = tostring(s or "")
+                s = s:gsub("'", "''")
+                return s
+            end
+            local python = escPS(PYTHON_PATH)
+            local sep = escPS(SEPARATOR_SCRIPT)
+            local inF = escPS(inputFile)
+            local outD = escPS(outputDir)
+            local m = escPS(model)
+            local dev = escPS(deviceArg)
+            local stdoutF = escPS(stdoutFile)
+            local stderrF = escPS(logFile)
+            local pidF = escPS(pidFile)
+            local doneF = escPS(doneFile)
 
             -- Build the PowerShell command that Start-Process the Python worker and writes PID
-            local psInner = "$p = Start-Process -FilePath '" .. python .. "' -ArgumentList @('-u','" .. sep .. "','" .. inF .. "','" .. outD .. "','--model','" .. m .. "','--device','" .. dev .. "') -WindowStyle Hidden -PassThru -RedirectStandardOutput '" .. stdoutF .. "' -RedirectStandardError '" .. stderrF .. "'; Set-Content -Path '" .. pidF .. "' -Value $p.Id -Encoding ascii; Wait-Process -Id $p.Id; Set-Content -Path '" .. doneF .. "' -Value 'DONE' -Encoding ascii"
+            local psInner =
+                "$py='" .. python .. "';" ..
+                "$sep='" .. sep .. "';" ..
+                "$in='" .. inF .. "';" ..
+                "$out='" .. outD .. "';" ..
+                "$model='" .. m .. "';" ..
+                "$dev='" .. dev .. "';" ..
+                "$dq=[char]34;" ..
+                "$sepq=$dq + $sep + $dq;" ..
+                "$inq=$dq + $in + $dq;" ..
+                "$outq=$dq + $out + $dq;" ..
+                "$modelq=$dq + $model + $dq;" ..
+                "$devq=$dq + $dev + $dq;" ..
+                "$p = Start-Process -FilePath $py -ArgumentList @('-u',$sepq,$inq,$outq,'--model',$modelq,'--device',$devq) -WindowStyle Hidden -PassThru -RedirectStandardOutput '" .. stdoutF .. "' -RedirectStandardError '" .. stderrF .. "'; " ..
+                "Set-Content -Path '" .. pidF .. "' -Value $p.Id -Encoding ascii; " ..
+                "Wait-Process -Id $p.Id; " ..
+                "Set-Content -Path '" .. doneF .. "' -Value 'DONE' -Encoding ascii"
 
             -- VBS: create shell and run PowerShell command invisibly (0 = hidden window)
             vbsFile:write('Set sh = CreateObject("WScript.Shell")\n')
@@ -13391,7 +13582,7 @@ explodeTakesFromItem = function(item, mode, skipUndo)
 end
 
 -- Create new tracks for each selected stem
-local function createStemTracks(item, stemPaths, itemPos, itemLen)
+function createStemTracks(item, stemPaths, itemPos, itemLen)
     local track = reaper.GetMediaItem_Track(item)
     local trackIdx = math.floor(reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER"))
     local _, trackName = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
@@ -13556,7 +13747,7 @@ local itemSubSelEnd = 0
 
 -- Get all items that overlap with a time range
 -- If selectedOnly is true, only returns items that are also selected
-local function getItemsInTimeRange(startTime, endTime, selectedOnly)
+function getItemsInTimeRange(startTime, endTime, selectedOnly)
     local items = {}
     local numTracks = reaper.CountTracks(0)
     for t = 0, numTracks - 1 do
@@ -13583,7 +13774,7 @@ local function getItemsInTimeRange(startTime, endTime, selectedOnly)
 end
 
 -- Get overlapping items on a single track (optionally selected-only)
-local function getItemsInTimeRangeOnTrack(track, startTime, endTime, selectedOnly)
+function getItemsInTimeRangeOnTrack(track, startTime, endTime, selectedOnly)
     local items = {}
     if not track or not reaper.ValidatePtr(track, "MediaTrack*") then return items end
     local numItems = reaper.CountTrackMediaItems(track)
@@ -13607,7 +13798,7 @@ local function getItemsInTimeRangeOnTrack(track, startTime, endTime, selectedOnl
 end
 
 -- Auto semantics: if any selected items overlap, operate on selected; otherwise operate on all overlapping.
-local function getItemsInTimeRangeAuto(startTime, endTime, sourceTrack)
+function getItemsInTimeRangeAuto(startTime, endTime, sourceTrack)
     if sourceTrack and reaper.ValidatePtr(sourceTrack, "MediaTrack*") then
         local sel = getItemsInTimeRangeOnTrack(sourceTrack, startTime, endTime, true)
         if #sel > 0 then return sel end
@@ -13618,7 +13809,7 @@ local function getItemsInTimeRangeAuto(startTime, endTime, sourceTrack)
     return getItemsInTimeRange(startTime, endTime, false)
 end
 
-local function muteSelectionInItemsFromList(items, startTime, endTime)
+function muteSelectionInItemsFromList(items, startTime, endTime)
     for _, item in ipairs(items) do
         local track = reaper.GetMediaItem_Track(item)
         local origItemPos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
@@ -13642,12 +13833,12 @@ local function muteSelectionInItemsFromList(items, startTime, endTime)
 end
 
 -- Mute the selection portion of items within a time range (selected-only by default via auto helper at call site)
-local function muteSelectionInItems(startTime, endTime)
+function muteSelectionInItems(startTime, endTime)
     local items = getItemsInTimeRange(startTime, endTime, true)  -- legacy behavior
     return muteSelectionInItemsFromList(items, startTime, endTime)
 end
 
-local function deleteSelectionInItemsFromList(items, startTime, endTime)
+function deleteSelectionInItemsFromList(items, startTime, endTime)
     -- Process in reverse order to avoid index shifting issues
     for i = #items, 1, -1 do
         local item = items[i]
@@ -13673,13 +13864,13 @@ local function deleteSelectionInItemsFromList(items, startTime, endTime)
 end
 
 -- Delete the selection portion of selected items within a time range (legacy default)
-local function deleteSelectionInItems(startTime, endTime)
+function deleteSelectionInItems(startTime, endTime)
     local items = getItemsInTimeRange(startTime, endTime, true)  -- legacy behavior
     return deleteSelectionInItemsFromList(items, startTime, endTime)
 end
 
 -- Create new tracks for stems from time selection (no original item)
-local function createStemTracksForSelection(stemPaths, selPos, selLen, sourceTrack)
+function createStemTracksForSelection(stemPaths, selPos, selLen, sourceTrack)
     reaper.Undo_BeginBlock()
 
     -- If there is a time-selection and selected items overlap it, create a set
@@ -13956,26 +14147,7 @@ function processStemsResult(stems)
                             reaper.Main_OnCommand(40289, 0) -- Unselect all items
                             reaper.SetMediaItemSelected(mainItem, true)
 
-                            -- Move the playhead to the start of the time selection only if the current
-                            -- playhead position is NOT already inside the time selection.
-                            -- Preserve playback running/stopped state: seek only if currently playing.
-                            local selStart, selEnd = timeSelectionStart, timeSelectionEnd
-                            if selStart and selEnd and selEnd > selStart then
-                                local playStateNow = reaper.GetPlayState() or 0
-                                local isPlayingNow = (playStateNow & 1) == 1
-
-                                local posNow
-                                if isPlayingNow and reaper.GetPlayPosition then
-                                    posNow = reaper.GetPlayPosition()
-                                else
-                                    posNow = reaper.GetCursorPosition()
-                                end
-
-                                local within = (posNow >= selStart) and (posNow <= selEnd)
-                                if not within then
-                                    reaper.SetEditCurPos(selStart, true, isPlayingNow)
-                                end
-                            end
+                            -- Intentionally do not move the playhead/cursor.
                         end
                     end
                     resultMsg = count == 1 and "Selection replaced with stem." or "Selection replaced with stems as takes (press T to switch)."
@@ -14177,30 +14349,27 @@ function drawResultWindow()
     local hover = mx >= btnX and mx <= btnX + btnW and my >= btnY and my <= btnY + btnH
 
     -- Button background
+    local okR, okG, okB = THEME.buttonPrimary[1], THEME.buttonPrimary[2], THEME.buttonPrimary[3]
     if hover then
-        gfx.set(THEME.buttonPrimaryHover[1], THEME.buttonPrimaryHover[2], THEME.buttonPrimaryHover[3], 1)
-    else
-        gfx.set(THEME.buttonPrimary[1], THEME.buttonPrimary[2], THEME.buttonPrimary[3], 1)
+        okR, okG, okB = THEME.buttonPrimaryHover[1], THEME.buttonPrimaryHover[2], THEME.buttonPrimaryHover[3]
     end
-    -- Draw rounded (pill-shaped) button
-    for i = 0, btnH - 1 do
-        local radius = btnH / 2
-        local inset = 0
-        if i < radius then
-            inset = radius - math.sqrt(radius * radius - (radius - i) * (radius - i))
-        elseif i > btnH - radius then
-            inset = radius - math.sqrt(radius * radius - (i - (btnH - radius)) * (i - (btnH - radius)))
-        end
-        gfx.line(btnX + inset, btnY + i, btnX + btnW - inset, btnY + i)
-    end
+    drawGlossyPill(btnX, btnY, btnW, btnH, okR, okG, okB)
 
     -- Button text
-    gfx.set(1, 1, 1, 1)
     gfx.setfont(1, "Arial", PS(13), string.byte('b'))
     local okText = T("ok") or "OK"
     local okW = gfx.measurestr(okText)
-    gfx.x = btnX + (btnW - okW) / 2
-    gfx.y = btnY + (btnH - PS(13)) / 2
+    local okX = btnX + (btnW - okW) / 2
+    local okY = btnY + (btnH - gfx.texth) / 2
+    gfx.set(0, 0, 0, 0.4)
+    gfx.x, gfx.y = okX + 2, okY + 2; gfx.drawstr(okText)
+    gfx.set(0, 0, 0, 0.6)
+    gfx.x, gfx.y = okX + 1, okY + 1; gfx.drawstr(okText)
+    gfx.x, gfx.y = okX - 1, okY + 1; gfx.drawstr(okText)
+    gfx.x, gfx.y = okX + 1, okY - 1; gfx.drawstr(okText)
+    gfx.x, gfx.y = okX - 1, okY - 1; gfx.drawstr(okText)
+    gfx.set(1, 1, 1, 1)
+    gfx.x, gfx.y = okX, okY
     gfx.drawstr(okText)
 
     -- Hint at very bottom edge
@@ -14327,31 +14496,7 @@ function showResultWindow(selectedStems, message)
     -- Initialize celebration effects
     initCelebration()
 
-    -- Restore playback state if it was playing before processing
-    -- Ensure playhead is inside the time selection (or move it to the start)
-    if timeSelectionStart and timeSelectionEnd then
-        local playStateBefore = savedPlaybackState or 0
-        local isPlayingBefore = (playStateBefore & 1) == 1
-        local posNow
-        if isPlayingBefore and reaper.GetPlayPosition then
-            posNow = reaper.GetPlayPosition()
-        else
-            posNow = reaper.GetCursorPosition()
-        end
-        local within = (posNow >= timeSelectionStart) and (posNow <= timeSelectionEnd)
-        if not within then
-            reaper.SetEditCurPos(timeSelectionStart, true, isPlayingBefore)
-        end
-    end
-
-    if savedPlaybackState == 1 then
-        -- Was playing, resume playback
-        reaper.OnPlayButton()
-    elseif savedPlaybackState == 2 then
-        -- Was paused, start and pause (to restore paused state)
-        reaper.OnPlayButton()
-        reaper.OnPauseButton()
-    end
+    -- Intentionally do not change playhead position or playback state.
 
     -- Return focus to REAPER main window so user can interact
     local mainHwnd = reaper.GetMainHwnd()
@@ -14694,20 +14839,36 @@ startSeparationProcessForJob = function(job, segmentSize)
         local vbsPath = job.trackDir .. PATH_SEP .. ("run_hidden_job_" .. tostring(job.index or 0) .. ".vbs")
         local vbsFile = io.open(vbsPath, "w")
         if vbsFile then
-            local function q(s) return tostring(s or "") end
-            local python = q(PYTHON_PATH)
-            local sep = q(SEPARATOR_SCRIPT)
-            local inF = q(job.inputFile)
-            local outD = q(job.trackDir)
-            local m = tostring(modelArg)
-            local dev = tostring(deviceArg)
-            local stdoutF = stdoutFile
-            local stderrF = logFile
-            local pidF = pidFile
-            local doneF = doneFile
+            local function escPS(s)
+                s = tostring(s or "")
+                s = s:gsub("'", "''")
+                return s
+            end
+            local python = escPS(PYTHON_PATH)
+            local sep = escPS(SEPARATOR_SCRIPT)
+            local inF = escPS(job.inputFile)
+            local outD = escPS(job.trackDir)
+            local m = escPS(modelArg)
+            local dev = escPS(deviceArg)
+            local stdoutF = escPS(stdoutFile)
+            local stderrF = escPS(logFile)
+            local pidF = escPS(pidFile)
+            local doneF = escPS(doneFile)
 
             local psInner =
-                "$p = Start-Process -FilePath '" .. python .. "' -ArgumentList @('-u','" .. sep .. "','" .. inF .. "','" .. outD .. "','--model','" .. m .. "','--device','" .. dev .. "') -WindowStyle Hidden -PassThru -RedirectStandardOutput '" .. stdoutF .. "' -RedirectStandardError '" .. stderrF .. "';" ..
+                "$py='" .. python .. "';" ..
+                "$sep='" .. sep .. "';" ..
+                "$in='" .. inF .. "';" ..
+                "$out='" .. outD .. "';" ..
+                "$model='" .. m .. "';" ..
+                "$dev='" .. dev .. "';" ..
+                "$dq=[char]34;" ..
+                "$sepq=$dq + $sep + $dq;" ..
+                "$inq=$dq + $in + $dq;" ..
+                "$outq=$dq + $out + $dq;" ..
+                "$modelq=$dq + $model + $dq;" ..
+                "$devq=$dq + $dev + $dq;" ..
+                "$p = Start-Process -FilePath $py -ArgumentList @('-u',$sepq,$inq,$outq,'--model',$modelq,'--device',$devq) -WindowStyle Hidden -PassThru -RedirectStandardOutput '" .. stdoutF .. "' -RedirectStandardError '" .. stderrF .. "';" ..
                 " Set-Content -Path '" .. pidF .. "' -Value $p.Id -Encoding ascii;" ..
                 " Wait-Process -Id $p.Id;" ..
                 " Set-Content -Path '" .. doneF .. "' -Value 'DONE' -Encoding ascii"
@@ -15232,6 +15393,10 @@ function drawMultiTrackProgressWindow()
             end
         end
 
+        if activeJob and type(activeJob.uiColor) == "table" then
+            termProgR, termProgG, termProgB = activeJob.uiColor[1] or termProgR, activeJob.uiColor[2] or termProgG, activeJob.uiColor[3] or termProgB
+        end
+
         -- Terminal text color should follow the same color as the processed track progress bar.
         local function jobBarColor(jobIdx)
             local s = STEMS[((jobIdx or 1) - 1) % #STEMS + 1]
@@ -15593,8 +15758,8 @@ function drawMultiTrackProgressWindow()
     local statusFontSize = PS(9)
     local statusPadX = PS(10)
     local statusBlockPadY = PS(2)
-    local statusBlockAlpha = 0.55
-    local statusBlockBorderAlpha = 0.6
+    local statusBlockAlpha = 0.7
+    local statusBlockBorderAlpha = 0.75
     gfx.setfont(1, "Arial", statusFontSize)
     local statusLineH = gfx.texth
     local statusBlockH = statusLineH + statusBlockPadY * 2
@@ -16197,17 +16362,14 @@ processAllStemsResult = function()
 
     -- Before clearing time selection, ensure playhead/cursor is at selection start
     if timeSelectionMode and timeSelectionStart and timeSelectionEnd then
-        local playStateBefore = savedPlaybackState or 0
-        local isPlayingBefore = (playStateBefore & 1) == 1
-        local posNow
-        if isPlayingBefore and reaper.GetPlayPosition then
-            posNow = reaper.GetPlayPosition()
-        else
-            posNow = reaper.GetCursorPosition()
-        end
-        local within = (posNow >= timeSelectionStart) and (posNow <= timeSelectionEnd)
-        if not within then
-            reaper.SetEditCurPos(timeSelectionStart, true, isPlayingBefore)
+        local playStateNow = reaper.GetPlayState() or 0
+        local isPlayingNow = (playStateNow & 1) == 1
+        if not isPlayingNow then
+            local posNow = reaper.GetCursorPosition()
+            local within = (posNow >= timeSelectionStart) and (posNow <= timeSelectionEnd)
+            if not within then
+                reaper.SetEditCurPos(timeSelectionStart, true, false)
+            end
         end
     end
 
@@ -16503,6 +16665,33 @@ function runSeparationWorkflow()
 
     debugLog("Extraction successful, starting separation..")
     debugLog("Model: " .. SETTINGS.model)
+    do
+        local fallback = THEME and THEME.accent or {1, 1, 1}
+        local fr, fg, fb = fallback[1] or 1, fallback[2] or 1, fallback[3] or 1
+        local function getTrackUIColor(track)
+            if not track or not reaper or not reaper.GetTrackColor or not reaper.ColorFromNative then
+                return { fr, fg, fb }
+            end
+            local col = reaper.GetTrackColor(track)
+            if not col or col == 0 then
+                return { fr, fg, fb }
+            end
+            local r, g, b = reaper.ColorFromNative(col)
+            r, g, b = tonumber(r) or 0, tonumber(g) or 0, tonumber(b) or 0
+            if r == 0 and g == 0 and b == 0 then
+                return { fr, fg, fb }
+            end
+            return { r / 255, g / 255, b / 255 }
+        end
+        local uiTrack = nil
+        if selectedItem and reaper.ValidatePtr(selectedItem, "MediaItem*") then
+            uiTrack = reaper.GetMediaItem_Track(selectedItem)
+        end
+        if not uiTrack and (reaper.CountSelectedTracks(0) or 0) > 0 then
+            uiTrack = reaper.GetSelectedTrack(0, 0)
+        end
+        progressState.uiColor = getTrackUIColor(uiTrack)
+    end
     -- Start separation with progress UI (async)
     runSeparationWithProgress(workflowTempInput, workflowTempDir, SETTINGS.model)
     debugLog("runSeparationWithProgress called")
@@ -16628,4 +16817,3 @@ main = function()
 end
 
 main()
-
