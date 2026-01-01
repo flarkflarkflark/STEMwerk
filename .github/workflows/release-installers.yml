@@ -89,10 +89,10 @@ jobs:
             & magick $png -define icon:auto-resize=256,128,64,48,32,16 $ico
 
             $wiz = Join-Path $assets "stemwerk-wizard.bmp"
-            & magick -size 164x314 xc:white `(` $png -resize 140x140 `)` -gravity center -composite $wiz
+            & magick $png -resize 140x140 -background white -gravity center -extent 164x314 $wiz
 
             $wizSmall = Join-Path $assets "stemwerk-wizard-small.bmp"
-            & magick -size 55x58 xc:white `(` $png -resize 48x48 `)` -gravity center -composite $wizSmall
+            & magick $png -resize 48x48 -background white -gravity center -extent 55x58 $wizSmall
           }
 
       - name: Build .exe (Inno Setup)
