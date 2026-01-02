@@ -258,9 +258,12 @@ local function sanitizeFriendlyName(name)
     local lbl = tostring(name)
     lbl = lbl:gsub("^%s+", "")
     lbl = lbl:gsub("[Aa][Mm][Dd]%s*[Rr]adeon%s*", "")
+    lbl = lbl:gsub("^RX%s*", "")
     lbl = lbl:gsub("[Nn][Vv][Ii][Dd][Ii][Aa]%s*[Gg]e[Ff]orce%s*", "")
     lbl = lbl:gsub("[Nn][Vv][Ii][Dd][Ii][Aa]%s*", "")
     lbl = lbl:gsub("[Ii][Nn][Tt][Ee][Ll]%s*", "")
+    lbl = lbl:gsub("%(%s*[Ee]xternal%s*%)", "eGPU")
+    lbl = lbl:gsub("%(%s*[Ii]nternal%s*%)", "iGPU")
     lbl = lbl:gsub("%s*[Gg]raphics%s*$", "")
     lbl = lbl:gsub("%s+", " ")
     lbl = lbl:gsub("^%s+", ""):gsub("%s+$", "")
@@ -626,58 +629,76 @@ function applyRuntimeDevicesFromParsed(devices, envJson, now)
         local lbl = tostring(name)
         lbl = lbl:gsub("^%s+", "")
         lbl = lbl:gsub("[Aa][Mm][Dd]%s*[Rr]adeon%s*", "")
+        lbl = lbl:gsub("^RX%s*", "")
         lbl = lbl:gsub("[Nn][Vv][Ii][Dd][Ii][Aa]%s*[Gg]e[Ff]orce%s*", "")
         lbl = lbl:gsub("[Nn][Vv][Ii][Dd][Ii][Aa]%s*", "")
         lbl = lbl:gsub("[Ii][Nn][Tt][Ee][Ll]%s*", "")
+        lbl = lbl:gsub("%(%s*[Ee]xternal%s*%)", "eGPU")
+        lbl = lbl:gsub("%(%s*[Ii]nternal%s*%)", "iGPU")
         lbl = lbl:gsub("%s*[Gg]raphics%s*$", "")
         lbl = lbl:gsub("%s+", " ")
         lbl = lbl:gsub("^%s+", ""):gsub("%s+$", "")
         return lbl
     end
 
-    -- Try to load an optional DirectML/CUDA mapping file that maps device ids
-    -- (e.g. "directml:0") to a human-friendly GPU name discovered by the
-    -- user or by external probing. File is optional.
+    -- Try to load optional mapping files that map device ids (e.g. "directml:0")
+    -- to a human-friendly GPU name discovered by probing. Files are optional.
     local function loadDeviceMap()
-        local candidates = {}
-        local name = "directml_device_map.json"
-        if type(script_path) == "string" and script_path ~= "" then
-            table.insert(candidates, script_path .. name)
-            table.insert(candidates, script_path .. ".." .. PATH_SEP .. name)
-        end
-        -- Try repo-relative common location
-        if type(repo_root) == "string" and repo_root ~= "" then
-            table.insert(candidates, repo_root .. "scripts" .. PATH_SEP .. "reaper" .. PATH_SEP .. name)
-        end
-        -- Try user Documents/STEMwerk path
-        local home = getHome()
-        if home then
-            if PATH_SEP == "\\" then
-                table.insert(candidates, home .. "\\Documents\\STEMwerk\\scripts\\reaper\\" .. name)
-            else
-                table.insert(candidates, home .. "/Documents/STEMwerk/scripts/reaper/" .. name)
+        local map = {}
+        local function readMapFile(mapPath)
+            local f = io.open(mapPath, "r")
+            if not f then return end
+            local ok, data = pcall(function() return f:read("*a") end)
+            f:close()
+            if not (ok and data and data ~= "") then return end
+            for k, v in data:gmatch('"([^"]+)"%s*:%s*"([^"]+)"') do
+                map[k] = v
             end
         end
-        -- Finally try current working dir and script-local name
-        table.insert(candidates, name)
 
-        for _, mapPath in ipairs(candidates) do
-            local f = io.open(mapPath, "r")
-            if f then
-                local ok, data = pcall(function() return f:read("*a") end)
-                f:close()
-                if ok and data and data ~= "" then
-                    local map = {}
-                    for k, v in data:gmatch('"([^"]+)"%s*:%s*"([^"]+)"') do
-                        map[k] = v
-                    end
-                    return map
+        local names = {"directml_device_map.json", "device_mapping.json"}
+        for _, name in ipairs(names) do
+            local candidates = {}
+            if type(script_path) == "string" and script_path ~= "" then
+                table.insert(candidates, script_path .. name)
+                table.insert(candidates, script_path .. ".." .. PATH_SEP .. name)
+                table.insert(candidates, script_path .. ".." .. PATH_SEP .. ".." .. PATH_SEP .. name)
+            end
+            -- Try repo-relative common location
+            if type(repo_root) == "string" and repo_root ~= "" then
+                table.insert(candidates, repo_root .. "scripts" .. PATH_SEP .. "reaper" .. PATH_SEP .. name)
+                table.insert(candidates, repo_root .. name)
+            end
+            -- Try user Documents/STEMwerk path
+            local home = getHome()
+            if home then
+                if PATH_SEP == "\\" then
+                    table.insert(candidates, home .. "\\Documents\\STEMwerk\\scripts\\reaper\\" .. name)
+                else
+                    table.insert(candidates, home .. "/Documents/STEMwerk/scripts/reaper/" .. name)
                 end
             end
+            -- Finally try current working dir and script-local name
+            table.insert(candidates, name)
+
+            for _, mapPath in ipairs(candidates) do
+                readMapFile(mapPath)
+            end
         end
+
+        if next(map) then return map end
         return nil
     end
     local deviceMap = loadDeviceMap() or {}
+    local function mappedDeviceName(id)
+        if not id or not deviceMap then return nil end
+        if deviceMap[id] then return deviceMap[id] end
+        local idx = tostring(id):match("^directml:(%d+)$")
+        if idx then
+            return deviceMap["privateuseone:" .. idx]
+        end
+        return nil
+    end
 
     -- Filter out backends that can never work on this OS.
     if OS ~= "Windows" then
@@ -692,8 +713,9 @@ function applyRuntimeDevicesFromParsed(devices, envJson, now)
 
     for _, d in ipairs(devices) do
         d.fullName = d.name
-        if deviceMap[d.id] then
-            d.fullName = deviceMap[d.id]
+        local mapped = mappedDeviceName(d.id)
+        if mapped then
+            d.fullName = mapped
         end
         if d.id and (d.id:match("^cuda:%d+$") or d.id:match("^directml:%d+$") or d.type == "cuda" or d.type == "directml") then
             d.uiName = sanitizeFriendlyName(d.fullName or d.name) or compactGpuLabel(d.id)
@@ -1243,10 +1265,12 @@ SETTINGS = {
     deleteSelection = false,   -- Delete only the selection portion (splits item)
     deleteOriginalTrack = false,
     darkMode = true,           -- Dark/Light theme toggle
+    themePreset = "classic",   -- Theme accent preset (classic/ember/ice/mono)
     parallelProcessing = true, -- Process multiple tracks in parallel (uses more GPU memory)
     language = "en",           -- UI language: en, nl, de
     visualFX = true,           -- Enable/disable visual effects (procedural art backgrounds)
     tooltips = true,           -- Global tooltip toggle
+    keepTempFiles = false,     -- Keep temp working folders/logs after a run
     device = "auto",           -- Device selection: "auto", "cpu", "cuda:0", "cuda:1", "directml"
 }
 
@@ -1398,6 +1422,116 @@ end
 
 -- Theme colors (will be set based on darkMode)
 local THEME = {}
+THEME_PRESET_ORDER = {"classic", "ember", "ice", "mono"}
+THEME_PRESETS = {
+    classic = {
+        nameKey = "theme_classic",
+        label = "Classic",
+    },
+    ember = {
+        nameKey = "theme_ember",
+        label = "Ember",
+        dark = {
+            accent = {0.75, 0.35, 0.25},
+            accentHover = {0.85, 0.45, 0.35},
+            checkboxChecked = {0.6, 0.35, 0.25},
+            button = {0.55, 0.25, 0.2},
+            buttonHover = {0.65, 0.35, 0.3},
+            buttonPrimary = {0.5, 0.35, 0.2},
+            buttonPrimaryHover = {0.6, 0.45, 0.3},
+            bgGradientTop = {0.11, 0.09, 0.08},
+            bgGradientBottom = {0.18, 0.14, 0.12},
+        },
+        light = {
+            accent = {0.7, 0.3, 0.2},
+            accentHover = {0.8, 0.4, 0.3},
+            checkboxChecked = {0.7, 0.35, 0.25},
+            button = {0.75, 0.4, 0.3},
+            buttonHover = {0.85, 0.5, 0.4},
+            buttonPrimary = {0.65, 0.4, 0.3},
+            buttonPrimaryHover = {0.75, 0.5, 0.4},
+            bgGradientTop = {0.98, 0.94, 0.92},
+            bgGradientBottom = {0.92, 0.88, 0.86},
+        },
+    },
+    ice = {
+        nameKey = "theme_ice",
+        label = "Ice",
+        dark = {
+            accent = {0.2, 0.65, 0.75},
+            accentHover = {0.3, 0.75, 0.85},
+            checkboxChecked = {0.2, 0.55, 0.65},
+            button = {0.2, 0.5, 0.6},
+            buttonHover = {0.3, 0.6, 0.7},
+            buttonPrimary = {0.2, 0.55, 0.55},
+            buttonPrimaryHover = {0.3, 0.65, 0.65},
+            bgGradientTop = {0.08, 0.1, 0.12},
+            bgGradientBottom = {0.14, 0.18, 0.2},
+        },
+        light = {
+            accent = {0.2, 0.55, 0.7},
+            accentHover = {0.3, 0.65, 0.8},
+            checkboxChecked = {0.25, 0.55, 0.7},
+            button = {0.3, 0.55, 0.7},
+            buttonHover = {0.4, 0.65, 0.8},
+            buttonPrimary = {0.25, 0.6, 0.6},
+            buttonPrimaryHover = {0.35, 0.7, 0.7},
+            bgGradientTop = {0.94, 0.97, 0.98},
+            bgGradientBottom = {0.88, 0.92, 0.94},
+        },
+    },
+    mono = {
+        nameKey = "theme_mono",
+        label = "Mono",
+        dark = {
+            accent = {0.55, 0.55, 0.6},
+            accentHover = {0.65, 0.65, 0.7},
+            checkboxChecked = {0.45, 0.45, 0.5},
+            button = {0.35, 0.35, 0.4},
+            buttonHover = {0.45, 0.45, 0.5},
+            buttonPrimary = {0.4, 0.4, 0.45},
+            buttonPrimaryHover = {0.5, 0.5, 0.55},
+            bgGradientTop = {0.11, 0.11, 0.12},
+            bgGradientBottom = {0.16, 0.16, 0.17},
+        },
+        light = {
+            accent = {0.4, 0.4, 0.45},
+            accentHover = {0.5, 0.5, 0.55},
+            checkboxChecked = {0.45, 0.45, 0.5},
+            button = {0.5, 0.5, 0.55},
+            buttonHover = {0.6, 0.6, 0.65},
+            buttonPrimary = {0.55, 0.55, 0.6},
+            buttonPrimaryHover = {0.65, 0.65, 0.7},
+            bgGradientTop = {0.96, 0.96, 0.97},
+            bgGradientBottom = {0.9, 0.9, 0.91},
+        },
+    },
+}
+
+function normalizeThemePreset(preset)
+    if type(preset) ~= "string" then
+        return "classic"
+    end
+    if THEME_PRESETS[preset] then
+        return preset
+    end
+    return "classic"
+end
+
+function applyThemePreset(themeTable)
+    local presetId = normalizeThemePreset(SETTINGS and SETTINGS.themePreset)
+    local preset = THEME_PRESETS[presetId]
+    if not preset then
+        return themeTable
+    end
+    local overrides = (SETTINGS and SETTINGS.darkMode) and preset.dark or preset.light
+    if overrides then
+        for key, value in pairs(overrides) do
+            themeTable[key] = value
+        end
+    end
+    return themeTable
+end
 
 local function updateTheme()
     if SETTINGS.darkMode then
@@ -1441,10 +1575,51 @@ local function updateTheme()
             border = {0.4, 0.4, 0.4},
         }
     end
+    applyThemePreset(THEME)
 end
 
 -- Initialize theme
 updateTheme()
+
+function getThemePresetLabel()
+    local presetId = normalizeThemePreset(SETTINGS and SETTINGS.themePreset)
+    local preset = THEME_PRESETS[presetId] or THEME_PRESETS.classic
+    local key = preset and preset.nameKey
+    if LANG and key and LANG[key] then
+        return LANG[key]
+    end
+    return preset and preset.label or presetId
+end
+
+function getLangText(key, fallback)
+    if LANG and LANG[key] then
+        return LANG[key]
+    end
+    return fallback or key:gsub("_", " ")
+end
+
+function getThemeToggleTooltip()
+    local switchTip = SETTINGS.darkMode and T("switch_light") or T("switch_dark")
+    local presetLabel = getLangText("theme_preset", "Theme")
+    local presetName = getThemePresetLabel()
+    local cycleHint = getLangText("tooltip_theme_cycle", "RMB to cycle preset")
+    return string.format("%s  %s: %s (%s)", switchTip, presetLabel, presetName, cycleHint)
+end
+
+function cycleThemePreset()
+    local current = normalizeThemePreset(SETTINGS and SETTINGS.themePreset)
+    local idx = 1
+    for i, presetId in ipairs(THEME_PRESET_ORDER) do
+        if presetId == current then
+            idx = i
+            break
+        end
+    end
+    local nextId = THEME_PRESET_ORDER[(idx % #THEME_PRESET_ORDER) + 1]
+    SETTINGS.themePreset = nextId
+    updateTheme()
+    saveSettings()
+end
 
 -- GUI state
 GUI = {
@@ -1535,6 +1710,9 @@ local function loadSettings()
 
     local darkMode = reaper.GetExtState(EXT_SECTION, "darkMode")
     if darkMode ~= "" then SETTINGS.darkMode = (darkMode == "1") end
+    local themePreset = reaper.GetExtState(EXT_SECTION, "themePreset")
+    if themePreset ~= "" then SETTINGS.themePreset = themePreset end
+    SETTINGS.themePreset = normalizeThemePreset(SETTINGS.themePreset)
     updateTheme()
 
     local parallelProcessing = reaper.GetExtState(EXT_SECTION, "parallelProcessing")
@@ -1545,6 +1723,9 @@ local function loadSettings()
 
     local tooltips = reaper.GetExtState(EXT_SECTION, "tooltips")
     if tooltips ~= "" then SETTINGS.tooltips = (tooltips == "1") end
+
+    local keepTempFiles = reaper.GetExtState(EXT_SECTION, "keepTempFiles")
+    if keepTempFiles ~= "" then SETTINGS.keepTempFiles = (keepTempFiles == "1") end
 
     local device = reaper.GetExtState(EXT_SECTION, "device")
     if device ~= "" then SETTINGS.device = device end
@@ -1605,9 +1786,11 @@ saveSettings = function()
     reaper.SetExtState(EXT_SECTION, "deleteSelection", SETTINGS.deleteSelection and "1" or "0", true)
     reaper.SetExtState(EXT_SECTION, "deleteOriginalTrack", SETTINGS.deleteOriginalTrack and "1" or "0", true)
     reaper.SetExtState(EXT_SECTION, "darkMode", SETTINGS.darkMode and "1" or "0", true)
+    reaper.SetExtState(EXT_SECTION, "themePreset", tostring(SETTINGS.themePreset or "classic"), true)
     reaper.SetExtState(EXT_SECTION, "parallelProcessing", SETTINGS.parallelProcessing and "1" or "0", true)
     reaper.SetExtState(EXT_SECTION, "visualFX", SETTINGS.visualFX and "1" or "0", true)
     reaper.SetExtState(EXT_SECTION, "tooltips", SETTINGS.tooltips and "1" or "0", true)
+    reaper.SetExtState(EXT_SECTION, "keepTempFiles", SETTINGS.keepTempFiles and "1" or "0", true)
     reaper.SetExtState(EXT_SECTION, "language", SETTINGS.language, true)
     reaper.SetExtState(EXT_SECTION, "device", SETTINGS.device, true)
 
@@ -1906,6 +2089,21 @@ local function drawTooltipStyled(tooltipText, tooltipX, tooltipY, winW, winH, pa
     end
 end
 
+local function updateControlsOpacity(state, mouseInControls)
+    if not state then
+        return mouseInControls and 1.0 or 0.0
+    end
+    if state.controlsOpacity == nil then
+        state.controlsOpacity = mouseInControls and 1.0 or 0.0
+    end
+    local target = mouseInControls and 1.0 or 0.0
+    local speed = mouseInControls and 0.25 or 0.08
+    state.controlsOpacity = state.controlsOpacity + (target - state.controlsOpacity) * speed
+    if state.controlsOpacity < 0 then state.controlsOpacity = 0 end
+    if state.controlsOpacity > 1 then state.controlsOpacity = 1 end
+    return state.controlsOpacity
+end
+
 local STEMWERK_LOGO_LETTERS = {"S", "T", "E", "M", "w", "e", "r", "k"}
 
 local function measureStemwerkLogo(fontSize, fontName, bold)
@@ -1987,7 +2185,7 @@ end
 
 -- Help system state (replaces Art Gallery)
 local helpState = {
-    currentTab = 1,  -- 1=Welcome, 2=Quick Start, 3=Stems, 4=Art Gallery
+    currentTab = 1,  -- 1=Welcome, 2=Quick Start, 3=Stems, 4=Reaper, 5=Gallery, 6=About
     wasMouseDown = false,
     wasRightMouseDown = false,
     startTime = 0,
@@ -4760,9 +4958,9 @@ local function drawArtGallery()
     local function UI(val) return math.floor(val * baseScale + 0.5) end
 
     -- Apply text zoom to scale for non-gallery/about tabs (content only)
-    -- Tab 4 (Gallery) and Tab 5 (About) use art zoom instead
+    -- Tab 5 (Gallery) and Tab 6 (About) use art zoom instead
     local scale = baseScale
-    if helpState.currentTab ~= 4 and helpState.currentTab ~= 5 then
+    if helpState.currentTab ~= 5 and helpState.currentTab ~= 6 then
         scale = baseScale * helpState.textZoom
     end
     -- PS() = zoomed scale for content that CAN zoom
@@ -4785,7 +4983,7 @@ local function drawArtGallery()
     if mouseWheel ~= artGalleryState.lastMouseWheel then
         local delta = (mouseWheel - artGalleryState.lastMouseWheel) / 120
 
-        if helpState.currentTab == 4 or helpState.currentTab == 5 then
+        if helpState.currentTab == 5 or helpState.currentTab == 6 then
             -- Gallery/About tab: zoom art (fly-through effect with huge zoom range)
             local zoomFactor = 1.15
             if delta > 0 then
@@ -4815,22 +5013,22 @@ local function drawArtGallery()
         artGalleryState.lastMouseWheel = mouseWheel
     end
 
+    -- Track click start for click-to-new-art on text tabs
+    if mouseDown and not helpState.wasMouseDown then
+        helpState.clickStartX = mx
+        helpState.clickStartY = my
+        helpState.wasDrag = false
+    end
+
     -- Mouse handling depends on tab
     local rightMouseDown = gfx.mouse_cap & 2 == 2
 
-    if helpState.currentTab == 4 or helpState.currentTab == 5 then
+    if helpState.currentTab == 5 or helpState.currentTab == 6 then
         -- === GALLERY/ABOUT TAB MOUSE CONTROLS ===
         -- Left-click drag = pan
         -- Right-click drag = rotate
         -- Single left-click (no drag) = new art
         -- Double-click = reset
-
-        -- Track click start for drag detection
-        if mouseDown and not helpState.wasMouseDown then
-            helpState.clickStartX = mx
-            helpState.clickStartY = my
-            helpState.wasDrag = false
-        end
 
         -- Left-click drag = pan
         if mouseDown and not artGalleryState.isDragging then
@@ -4934,7 +5132,7 @@ local function drawArtGallery()
         local now = os.clock()
         if artGalleryState.lastClickTime and now - artGalleryState.lastClickTime < 0.3 then
             -- Double click - reset camera and rotation ONLY if not dragging
-            if not helpState.wasDrag and (helpState.currentTab == 4 or helpState.currentTab == 5) then
+            if not helpState.wasDrag and (helpState.currentTab == 5 or helpState.currentTab == 6) then
                 artGalleryState.targetZoom = 1.0
                 artGalleryState.targetPanX = 0
                 artGalleryState.targetPanY = 0
@@ -5001,7 +5199,7 @@ local function drawArtGallery()
         helpState.controlsOpacity = math.max(0, math.min(1, helpState.controlsOpacity))
         controlsOpacity = helpState.controlsOpacity
     end
-    local tabs = {T("help_welcome"), T("help_quickstart"), T("help_stems"), T("help_gallery"), T("help_about")}
+    local tabs = {T("help_welcome"), T("help_quickstart"), T("help_stems"), T("help_reaper"), T("help_gallery"), T("help_about")}
 
     -- Reserve space for the top-right controls so tabs never overlap EN/FX.
     local iconScale = 0.66
@@ -5057,10 +5255,9 @@ local function drawArtGallery()
         else
             bgAlpha = 0.6 * controlsOpacity
         end
-        if isActive then
-            gfx.set(stemColors[i][1], stemColors[i][2], stemColors[i][3], bgAlpha)
-        elseif hover then
-            gfx.set(stemColors[i][1], stemColors[i][2], stemColors[i][3], bgAlpha)
+        local tabColor = stemColors[i] or {0.45, 0.55, 0.7}
+        if isActive or hover then
+            gfx.set(tabColor[1], tabColor[2], tabColor[3], bgAlpha)
         else
             gfx.set(0.3, 0.3, 0.35, bgAlpha)
         end
@@ -5105,8 +5302,11 @@ local function drawArtGallery()
 
     -- Theme click handling and tooltip
     if themeHover and controlsOpacity > 0.3 then
-        tooltipText = SETTINGS.darkMode and T("switch_light") or T("switch_dark")
+        tooltipText = getThemeToggleTooltip()
         tooltipX, tooltipY = mx + UI(10), my + UI(15)
+        if rightMouseDown and not helpState.wasRightMouseDown then
+            cycleThemePreset()
+        end
         if mouseDown and not helpState.wasMouseDown then
             SETTINGS.darkMode = not SETTINGS.darkMode
             updateTheme()
@@ -5210,7 +5410,7 @@ local function drawArtGallery()
     -- Apply text pan offset for non-gallery tabs
     local textOffsetX = 0
     local textOffsetY = 0
-    if helpState.currentTab ~= 4 then
+    if helpState.currentTab ~= 5 and helpState.currentTab ~= 6 then
         textOffsetX = helpState.textPanX
         textOffsetY = helpState.textPanY
         -- Apply Y offset directly to content area for text tabs
@@ -5218,7 +5418,7 @@ local function drawArtGallery()
     end
 
     -- === TAB CONTENT ===
-    if helpState.currentTab == 4 then
+    if helpState.currentTab == 5 then
         -- ART GALLERY TAB - Fullscreen procedural art (below tabs)
 
         -- Tab area height to keep tabs visible
@@ -6861,7 +7061,85 @@ local function drawArtGallery()
             gfx.drawstr(model6Desc)
         end
 
-    elseif helpState.currentTab == 5 then
+    elseif helpState.currentTab == 4 then
+        -- === REAPER FILES TAB ===
+
+        -- Subtle procedural art background (gated by FX toggle)
+        if SETTINGS.visualFX then
+            local artAreaY = UI(40)
+            local artAreaH = h - artAreaY - UI(50)
+            drawProceduralArt(0, artAreaY, w, artAreaH, time, 0, false)
+            -- Dim the art a touch so text stays readable.
+            if SETTINGS.darkMode then
+                gfx.set(0, 0, 0, 0.5)
+            else
+                gfx.set(1, 1, 1, 0.5)
+            end
+            gfx.rect(0, artAreaY, w, artAreaH, 1)
+        end
+
+        -- Click for new art (same area rules as Gallery)
+        if not mouseDown and helpState.wasMouseDown then
+            local tabAreaBottom = UI(40)
+            local closeBtnTop = h - UI(50)
+            local startY = helpState.clickStartY or my
+            if startY > tabAreaBottom and startY < closeBtnTop then
+                local dx = mx - (helpState.clickStartX or mx)
+                local dy = my - (helpState.clickStartY or my)
+                local dragThreshold = PS(6)
+                if (dx * dx + dy * dy) <= (dragThreshold * dragThreshold) then
+                    generateNewArt()
+                end
+            end
+        end
+
+        gfx.setfont(1, "Arial", PS(26), string.byte('b'))
+        gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
+        local repTitle = T("help_reaper_title")
+        local repW = gfx.measurestr(repTitle)
+        gfx.x = (w - repW) / 2 + textOffsetX
+        gfx.y = contentY + PS(10) + textOffsetY
+        gfx.drawstr(repTitle)
+
+        gfx.setfont(1, "Arial", PS(13))
+        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+        local repSub = T("help_reaper_sub")
+        local repSubW = gfx.measurestr(repSub)
+        gfx.x = (w - repSubW) / 2 + textOffsetX
+        gfx.y = contentY + PS(40) + textOffsetY
+        gfx.drawstr(repSub)
+
+        local sectionX = PS(40) + textOffsetX
+        local sectionY = contentY + PS(75) + textOffsetY
+        local maxW = w - PS(80)
+
+        local function drawHelpSection(titleKey, bodyKey)
+            local title = T(titleKey)
+            local body = T(bodyKey)
+            gfx.setfont(1, "Arial", PS(16), string.byte('b'))
+            gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
+            gfx.x = sectionX
+            gfx.y = sectionY
+            gfx.drawstr(title)
+            sectionY = sectionY + PS(20)
+
+            gfx.setfont(1, "Arial", PS(12))
+            gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+            local lines = _wrapTextToWidth(body, maxW)
+            for _, ln in ipairs(lines) do
+                gfx.x = sectionX
+                gfx.y = sectionY
+                gfx.drawstr(ln)
+                sectionY = sectionY + PS(16)
+            end
+            sectionY = sectionY + PS(12)
+        end
+
+        drawHelpSection("help_reaper_temp_title", "help_reaper_temp_body")
+        drawHelpSection("help_reaper_logs_title", "help_reaper_logs_body")
+        drawHelpSection("help_reaper_cleanup_title", "help_reaper_cleanup_body")
+
+    elseif helpState.currentTab == 6 then
         -- === ABOUT TAB ===
         -- Fullscreen procedural art background with zoom/pan (like Gallery)
         local tabAreaH = UI(40)
@@ -7055,7 +7333,7 @@ local function drawArtGallery()
         local hintX = UI(14)
         local hintY = btnY + (btnH - hintSize) / 2
         -- On About, place the hint slightly above the Back button (credits live at the very bottom).
-        if helpState.currentTab == 5 then
+        if helpState.currentTab == 6 then
             hintY = btnY - UI(22)
         end
         local hintHover = mx >= hintX and mx <= hintX + hintSize and my >= hintY and my <= hintY + hintSize
@@ -7069,9 +7347,9 @@ local function drawArtGallery()
         gfx.drawstr("?")
 
         if hintHover and controlsOpacity > 0.3 then
-            if helpState.currentTab == 4 then
+            if helpState.currentTab == 5 then
                 tooltipText = T("help_gallery_controls_tip")
-            elseif helpState.currentTab == 5 then
+            elseif helpState.currentTab == 6 then
                 tooltipText = T("help_about_controls_tip")
             else
                 tooltipText = T("help_text_controls_tip")
@@ -7129,7 +7407,7 @@ local function drawArtGallery()
             return "close"
         elseif isDoubleClick and not helpState.wasDrag then
             -- Double-click anywhere resets zoom/pan (only if not dragging)
-            if helpState.currentTab == 4 or helpState.currentTab == 5 then
+            if helpState.currentTab == 5 or helpState.currentTab == 6 then
                 resetCamera()
             else
                 resetTextZoom()
@@ -7144,7 +7422,7 @@ local function drawArtGallery()
         return "close"
     elseif char == 13 then  -- Enter key = start STEMwerk
         return "start"
-    elseif helpState.currentTab == 4 or helpState.currentTab == 5 then
+    elseif helpState.currentTab == 5 or helpState.currentTab == 6 then
         -- Art gallery / About tab navigation
         if char == 114 or char == 82 then  -- R key to reset camera
             resetCamera()
@@ -7154,7 +7432,7 @@ local function drawArtGallery()
         end
     end
     -- Tab switching with number keys
-    if char >= 49 and char <= 53 then  -- 1-5 keys
+    if char >= 49 and char <= 54 then  -- 1-6 keys
         helpState.currentTab = char - 48
         resetCamera()
         resetTextZoom()
@@ -7199,6 +7477,7 @@ local function artGalleryLoop()
         "STEMwerk - " .. T("help_welcome"),
         "STEMwerk - " .. T("help_quickstart"),
         "STEMwerk - " .. T("help_stems"),
+        "STEMwerk - " .. T("help_reaper"),
         "STEMwerk - " .. T("help_gallery"),
         "STEMwerk - " .. T("help_about")
     }
@@ -7446,14 +7725,20 @@ local function drawMessageWindow()
     local themeY = PS(8)
     local themeHover = mx >= themeX and mx <= themeX + themeSize and my >= themeY and my <= themeY + themeSize
 
+    local controlsLeft = themeX - PS(60)
+    local controlsBottom = themeY + themeSize + PS(30)
+    local mouseInControls = (mx >= controlsLeft) and (my >= 0) and (my <= controlsBottom)
+    local controlsOpacity = updateControlsOpacity(messageWindowState, mouseInControls)
+
     if SETTINGS.darkMode then
-        gfx.set(0.7, 0.7, 0.5, themeHover and 1 or 0.6)
+        gfx.set(0.7, 0.7, 0.5, (themeHover and 1 or 0.6) * controlsOpacity)
         gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/2 - 2, 1, 1)
-        gfx.set(0, 0, 0, 1)  -- Pure black for moon overlay
+        gfx.set(0, 0, 0, 1 * controlsOpacity)  -- Pure black for moon overlay
         gfx.circle(themeX + themeSize/2 + 4, themeY + themeSize/2 - 3, themeSize/2 - 3, 1, 1)
     else
-        gfx.set(0.9, 0.7, 0.2, themeHover and 1 or 0.8)
+        gfx.set(0.9, 0.7, 0.2, (themeHover and 1 or 0.8) * controlsOpacity)
         gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/3, 1, 1)
+        gfx.set(0.9, 0.7, 0.2, (themeHover and 1 or 0.8) * controlsOpacity)
         for i = 0, 7 do
             local angle = i * math.pi / 4
             local x1 = themeX + themeSize/2 + math.cos(angle) * (themeSize/3 + 2)
@@ -7464,7 +7749,10 @@ local function drawMessageWindow()
         end
     end
 
-    if themeHover and mouseDown and not messageWindowState.wasMouseDown then
+    if themeHover and rightMouseDown and not (messageWindowState.wasRightMouseDown or false) and controlsOpacity > 0.3 then
+        cycleThemePreset()
+    end
+    if themeHover and mouseDown and not messageWindowState.wasMouseDown and controlsOpacity > 0.3 then
         SETTINGS.darkMode = not SETTINGS.darkMode
         updateTheme()
         saveSettings()
@@ -7483,9 +7771,9 @@ local function drawMessageWindow()
     local langTextW = gfx.measurestr(langCode)
 
     if langHover then
-        gfx.set(0.4, 0.6, 0.9, 1)
+        gfx.set(0.4, 0.6, 0.9, 1 * controlsOpacity)
     else
-        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 0.8)
+        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 0.8 * controlsOpacity)
     end
     gfx.x = langX + (langW - langTextW) / 2
     gfx.y = langY
@@ -7493,11 +7781,11 @@ local function drawMessageWindow()
 
     -- Handle language toggle click
     local rightMouseDown = gfx.mouse_cap & 2 == 2
-    if langHover and rightMouseDown and not (messageWindowState.wasRightMouseDown or false) then
+    if langHover and rightMouseDown and not (messageWindowState.wasRightMouseDown or false) and controlsOpacity > 0.3 then
         SETTINGS.tooltips = not SETTINGS.tooltips
         saveSettings()
     end
-    if langHover and mouseDown and not messageWindowState.wasMouseDown then
+    if langHover and mouseDown and not messageWindowState.wasMouseDown and controlsOpacity > 0.3 then
         -- Cycle through languages: en -> nl -> de -> en
         local langs = {"en", "nl", "de"}
         local currentIdx = 1
@@ -7515,7 +7803,7 @@ local function drawMessageWindow()
     local fxY = themeY + themeSize + PS(3)
     local fxHover = mx >= fxX - PS(2) and mx <= fxX + fxSize + PS(2) and my >= fxY - PS(2) and my <= fxY + fxSize + PS(2)
 
-    local fxAlpha = fxHover and 1 or 0.7
+    local fxAlpha = (fxHover and 1 or 0.7) * controlsOpacity
     if SETTINGS.visualFX then
         gfx.set(0.4, 0.9, 0.5, fxAlpha)
     else
@@ -7537,7 +7825,7 @@ local function drawMessageWindow()
         gfx.line(fxX - PS(1), fxY + fxSize / 2, fxX + fxSize + PS(1), fxY + fxSize / 2)
     end
 
-    if fxHover and mouseDown and not messageWindowState.wasMouseDown then
+    if fxHover and mouseDown and not messageWindowState.wasMouseDown and controlsOpacity > 0.3 then
         SETTINGS.visualFX = not SETTINGS.visualFX
         saveSettings()
     end
@@ -7546,15 +7834,15 @@ local function drawMessageWindow()
     local tooltipText = nil
     local tooltipX, tooltipY = 0, 0
 
-    if themeHover then
-        tooltipText = SETTINGS.darkMode and T("switch_light") or T("switch_dark")
+    if themeHover and controlsOpacity > 0.3 then
+        tooltipText = getThemeToggleTooltip()
         tooltipX = mx + PS(10)
         tooltipY = my + PS(15)
-    elseif langHover then
+    elseif langHover and controlsOpacity > 0.3 then
         tooltipText = T("tooltip_change_language")
         tooltipX = mx + PS(10)
         tooltipY = my + PS(15)
-    elseif fxHover then
+    elseif fxHover and controlsOpacity > 0.3 then
         tooltipText = SETTINGS.visualFX and T("fx_disable") or T("fx_enable")
         tooltipX = mx + PS(10)
         tooltipY = my + PS(15)
@@ -8541,6 +8829,7 @@ end
 function drawResultWindowControls(ctx)
     local w, PS = ctx.w, ctx.PS
     local mx, my, mouseDown = ctx.mx, ctx.my, ctx.mouseDown
+    local rightMouseDown = gfx.mouse_cap & 2 == 2
     local tooltipText = ctx.tooltipText
     local tooltipX = ctx.tooltipX
     local tooltipY = ctx.tooltipY
@@ -8551,18 +8840,24 @@ function drawResultWindowControls(ctx)
     local themeY = PS(8)
     local themeHover = mx >= themeX and mx <= themeX + themeSize and my >= themeY and my <= themeY + themeSize
 
+    local controlsLeft = themeX - PS(60)
+    local controlsBottom = themeY + themeSize + PS(30)
+    local mouseInControls = (mx >= controlsLeft) and (my >= 0) and (my <= controlsBottom)
+    local controlsOpacity = updateControlsOpacity(resultWindowState, mouseInControls)
+
     if themeHover then GUI.uiClickedThisFrame = true end
     if fxHover then GUI.uiClickedThisFrame = true end
     if langHover then GUI.uiClickedThisFrame = true end
 
     if SETTINGS.darkMode then
-        gfx.set(0.7, 0.7, 0.5, themeHover and 1 or 0.6)
+        gfx.set(0.7, 0.7, 0.5, (themeHover and 1 or 0.6) * controlsOpacity)
         gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/2 - 2, 1, 1)
-        gfx.set(0, 0, 0, 1)
+        gfx.set(0, 0, 0, 1 * controlsOpacity)
         gfx.circle(themeX + themeSize/2 + 4, themeY + themeSize/2 - 3, themeSize/2 - 3, 1, 1)
     else
-        gfx.set(0.9, 0.7, 0.2, themeHover and 1 or 0.8)
+        gfx.set(0.9, 0.7, 0.2, (themeHover and 1 or 0.8) * controlsOpacity)
         gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/3, 1, 1)
+        gfx.set(0.9, 0.7, 0.2, (themeHover and 1 or 0.8) * controlsOpacity)
         for i = 0, 7 do
             local angle = i * math.pi / 4
             local x1 = themeX + themeSize/2 + math.cos(angle) * (themeSize/3 + 2)
@@ -8573,13 +8868,16 @@ function drawResultWindowControls(ctx)
         end
     end
 
-    if themeHover and mouseDown and not resultWindowState.wasMouseDown then
+    if themeHover and rightMouseDown and not (resultWindowState.wasRightMouseDown or false) and controlsOpacity > 0.3 then
+        cycleThemePreset()
+    end
+    if themeHover and mouseDown and not resultWindowState.wasMouseDown and controlsOpacity > 0.3 then
         SETTINGS.darkMode = not SETTINGS.darkMode
         updateTheme()
         saveSettings()
     end
-    if themeHover then
-        tooltipText = SETTINGS.darkMode and (T("switch_light") or "Switch to light mode") or (T("switch_dark") or "Switch to dark mode")
+    if themeHover and controlsOpacity > 0.3 then
+        tooltipText = getThemeToggleTooltip()
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
     end
 
@@ -8588,7 +8886,7 @@ function drawResultWindowControls(ctx)
     local fxY = themeY + themeSize + PS(3)
     local fxHover = mx >= fxX - PS(2) and mx <= fxX + fxSize + PS(2) and my >= fxY - PS(2) and my <= fxY + fxSize + PS(2)
 
-    local fxAlpha = fxHover and 1 or 0.7
+    local fxAlpha = (fxHover and 1 or 0.7) * controlsOpacity
     if SETTINGS.visualFX then
         gfx.set(0.4, 0.9, 0.5, fxAlpha)
     else
@@ -8608,11 +8906,11 @@ function drawResultWindowControls(ctx)
         gfx.set(0.8, 0.3, 0.3, fxAlpha)
         gfx.line(fxX - PS(1), fxY + fxSize / 2, fxX + fxSize + PS(1), fxY + fxSize / 2)
     end
-    if fxHover and mouseDown and not resultWindowState.wasMouseDown then
+    if fxHover and mouseDown and not resultWindowState.wasMouseDown and controlsOpacity > 0.3 then
         SETTINGS.visualFX = not SETTINGS.visualFX
         saveSettings()
     end
-    if fxHover then
+    if fxHover and controlsOpacity > 0.3 then
         tooltipText = SETTINGS.visualFX and (T("fx_disable") or "Disable visual effects") or (T("fx_enable") or "Enable visual effects")
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
     end
@@ -8628,26 +8926,28 @@ function drawResultWindowControls(ctx)
     local langTextW = gfx.measurestr(langCode)
 
     if langHover then
-        gfx.set(0.4, 0.6, 0.9, 1)
-        tooltipText = T("tooltip_change_language") or "Click to change language"
-        tooltipX, tooltipY = mx + PS(10), my + PS(15)
-        local rightMouseDown = gfx.mouse_cap & 2 == 2
-        if rightMouseDown and not (resultWindowState.wasRightMouseDown or false) then
-            SETTINGS.tooltips = not SETTINGS.tooltips
-            saveSettings()
-        end
-        if mouseDown and not resultWindowState.wasMouseDown then
-            local langs = {"en", "nl", "de"}
-            local currentIdx = 1
-            for i, l in ipairs(langs) do
-                if l == SETTINGS.language then currentIdx = i; break end
+        gfx.set(0.4, 0.6, 0.9, 1 * controlsOpacity)
+        if controlsOpacity > 0.3 then
+            tooltipText = T("tooltip_change_language") or "Click to change language"
+            tooltipX, tooltipY = mx + PS(10), my + PS(15)
+            local rightMouseDown = gfx.mouse_cap & 2 == 2
+            if rightMouseDown and not (resultWindowState.wasRightMouseDown or false) then
+                SETTINGS.tooltips = not SETTINGS.tooltips
+                saveSettings()
             end
-            local nextIdx = (currentIdx % #langs) + 1
-            setLanguage(langs[nextIdx])
-            saveSettings()
+            if mouseDown and not resultWindowState.wasMouseDown then
+                local langs = {"en", "nl", "de"}
+                local currentIdx = 1
+                for i, l in ipairs(langs) do
+                    if l == SETTINGS.language then currentIdx = i; break end
+                end
+                local nextIdx = (currentIdx % #langs) + 1
+                setLanguage(langs[nextIdx])
+                saveSettings()
+            end
         end
     else
-        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 0.8)
+        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 0.8 * controlsOpacity)
     end
     gfx.x = langX + (langW - langTextW) / 2
     gfx.y = langY
@@ -8941,7 +9241,8 @@ end
 -- Optional attentionMult: when not selected, draw a subtle accent pulse (used to hint "direct tool" availability)
 -- Optional icon: currently supports "explode" (drawn at left; animated when attentionMult > 0)
 -- Optional fontSizeOverride: when provided, all radios in a group can share the same text size.
-local function drawRadio(x, y, selected, label, color, fixedW, attentionMult, icon, fontSizeOverride)
+-- Optional lockFontSize: when true, keep the font size fixed and truncate with ellipsis if needed.
+local function drawRadio(x, y, selected, label, color, fixedW, attentionMult, icon, fontSizeOverride, lockFontSize)
     local clicked = false
     local labelWidth = gfx.measurestr(label)
     local boxW = fixedW or (labelWidth + S(16))
@@ -8987,7 +9288,7 @@ local function drawRadio(x, y, selected, label, color, fixedW, attentionMult, ic
     local textAlpha = selected and 1 or (hover and 0.95 or 0.85)
 
     local baseFontSize = fontSizeOverride or S(13)
-    local minFontSize = S(9)
+    local minFontSize = lockFontSize and baseFontSize or S(9)
     local padding = S(4)
 
     if icon == "explode" then
@@ -9686,6 +9987,11 @@ local function dialogLoop()
 
     local uiRightClickBlock = themeHover or langHover or fxHover
 
+    local controlsLeft = langX - S(10)
+    local controlsBottom = fxY + fxSize + S(6)
+    local mouseInControls = (mx >= controlsLeft) and (my >= 0) and (my <= controlsBottom)
+    local controlsOpacity = updateControlsOpacity(GUI, mouseInControls)
+
     -- === MOUSE INTERACTION FOR BACKGROUND ART ===
 
     -- Mousewheel zoom
@@ -9780,15 +10086,16 @@ local function dialogLoop()
     -- Draw theme toggle (circle with rays for sun, crescent for moon)
     if SETTINGS.darkMode then
         -- Moon icon (crescent)
-        gfx.set(0.7, 0.7, 0.5, themeHover and 1 or 0.6)
+        gfx.set(0.7, 0.7, 0.5, (themeHover and 1 or 0.6) * controlsOpacity)
         gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/2 - 2, 1, 1)
-        gfx.set(0, 0, 0, 1)  -- Pure black for moon overlay
+        gfx.set(0, 0, 0, 1 * controlsOpacity)  -- Pure black for moon overlay
         gfx.circle(themeX + themeSize/2 + 4, themeY + themeSize/2 - 3, themeSize/2 - 3, 1, 1)
     else
         -- Sun icon
-        gfx.set(0.9, 0.7, 0.2, themeHover and 1 or 0.8)
+        gfx.set(0.9, 0.7, 0.2, (themeHover and 1 or 0.8) * controlsOpacity)
         gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/3, 1, 1)
         -- Rays
+        gfx.set(0.9, 0.7, 0.2, (themeHover and 1 or 0.8) * controlsOpacity)
         for i = 0, 7 do
             local angle = i * math.pi / 4
             local x1 = themeX + themeSize/2 + math.cos(angle) * (themeSize/3 + 2)
@@ -9800,9 +10107,12 @@ local function dialogLoop()
     end
 
     -- Handle theme toggle click and tooltip
-    if themeHover then
-        local themeTip = SETTINGS.darkMode and T("switch_light") or T("switch_dark")
+    if themeHover and controlsOpacity > 0.3 then
+        local themeTip = getThemeToggleTooltip()
         setTooltip(themeX, themeY, themeSize, themeSize, themeTip)
+        if rightMouseDown and not mainDialogArt.wasRightMouseDown then
+            cycleThemePreset()
+        end
         if mouseDown and not GUI.wasMouseDown then
             SETTINGS.darkMode = not SETTINGS.darkMode
             updateTheme()
@@ -9819,16 +10129,16 @@ local function dialogLoop()
     local langTextW = gfx.measurestr(langCode)
 
     if langHover then
-        gfx.set(0.4, 0.6, 0.9, 1)
+        gfx.set(0.4, 0.6, 0.9, 1 * controlsOpacity)
     else
-        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 0.8)
+        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 0.8 * controlsOpacity)
     end
     gfx.x = langX + (langW - langTextW) / 2
     gfx.y = langY
     gfx.drawstr(langCode)
 
     -- Handle language toggle click
-    if langHover then
+    if langHover and controlsOpacity > 0.3 then
         setTooltip(langX, langY, langW, langH, T("tooltip_change_language"))
         if rightMouseDown and not mainDialogArt.wasRightMouseDown then
             SETTINGS.tooltips = not SETTINGS.tooltips
@@ -9850,7 +10160,7 @@ local function dialogLoop()
     -- === FX TOGGLE (below theme icon) ===
     -- NOTE: fxX/fxY/fxSize/fxHover already computed early (used to block RMB art-rotation)
 
-    local fxAlpha = fxHover and 1 or 0.7
+    local fxAlpha = (fxHover and 1 or 0.7) * controlsOpacity
     if SETTINGS.visualFX then
         gfx.set(0.4, 0.9, 0.5, fxAlpha)
     else
@@ -9872,7 +10182,7 @@ local function dialogLoop()
         gfx.line(fxX - S(1), fxY + fxSize / 2, fxX + fxSize + S(1), fxY + fxSize / 2)
     end
 
-    if fxHover then
+    if fxHover and controlsOpacity > 0.3 then
         setTooltip(fxX - S(2), fxY - S(2), fxSize + S(4), fxSize + S(4), SETTINGS.visualFX and T("fx_disable") or T("fx_enable"))
         if mouseDown and not GUI.wasMouseDown then
             SETTINGS.visualFX = not SETTINGS.visualFX
@@ -10089,6 +10399,10 @@ local function dialogLoop()
 
     -- Processing mode (single toggle button: Parallel ↔ Sequential)
     modelY = modelY + S(8)
+    gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+    drawColumnHeader(T("processing_mode") or "Processing:", col3X, modelBoxW, mainHeaderFont, modelY)
+    gfx.setfont(1, "Arial", S(13))
+    modelY = modelY + S(20)
     local modeLabel = SETTINGS.parallelProcessing and (T("parallel") or "Parallel") or (T("sequential") or "Sequential")
     -- Use theme accent (same blue as Device Auto selection).
     if drawRadio(col3X, modelY, true, modeLabel, nil, modelBoxW, nil, nil, commonBtnFontSize) then
@@ -10097,6 +10411,31 @@ local function dialogLoop()
     end
     local modeTip = SETTINGS.parallelProcessing and T("tooltip_parallel") or T("tooltip_sequential")
     setTooltip(col3X, modelY, modelBoxW, btnH, modeTip)
+
+    -- Temp files settings (under Model column)
+    modelY = modelY + S(28)
+    gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+    local tempHeaderY = modelY
+    drawColumnHeader(T("temp_files") or "Temp files:", col3X, modelBoxW, mainHeaderFont, tempHeaderY)
+    gfx.setfont(1, "Arial", S(13))
+
+    modelY = tempHeaderY + S(20)
+    local keepLabel = T("temp_files_keep") or "Keep"
+    local deleteLabel = T("temp_files_delete") or "Delete"
+    local tempLabel = SETTINGS.keepTempFiles and keepLabel or deleteLabel
+    local tempR, tempG, tempB
+    if SETTINGS.keepTempFiles then
+        tempR = THEME.accent[1] * 255
+        tempG = THEME.accent[2] * 255
+        tempB = THEME.accent[3] * 255
+    else
+        tempR, tempG, tempB = 255, 120, 120
+    end
+    if drawCheckbox(col3X, modelY, true, tempLabel, tempR, tempG, tempB, modelBoxW, commonBtnFontSize) then
+        SETTINGS.keepTempFiles = not SETTINGS.keepTempFiles
+    end
+    local tempTip = SETTINGS.keepTempFiles and T("tooltip_keep_temp_files") or T("tooltip_delete_temp_files")
+    setTooltip(col3X, modelY, modelBoxW, btnH, tempTip)
 
     -- === COLUMN 4: Device ===
     gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
@@ -10109,41 +10448,58 @@ local function dialogLoop()
     local deviceList = RUNTIME_DEVICES or DEVICES
     -- Load optional device map so placeholders and runtime devices can show friendly names.
     local function loadDeviceMap()
-        local candidates = {}
-        local name = "directml_device_map.json"
-        if type(script_path) == "string" and script_path ~= "" then
-            table.insert(candidates, script_path .. name)
-            table.insert(candidates, script_path .. ".." .. PATH_SEP .. name)
-        end
-        if type(repo_root) == "string" and repo_root ~= "" then
-            table.insert(candidates, repo_root .. "scripts" .. PATH_SEP .. "reaper" .. PATH_SEP .. name)
-        end
-        local home = getHome()
-        if home then
-            if PATH_SEP == "\\" then
-                table.insert(candidates, home .. "\\Documents\\STEMwerk\\scripts\\reaper\\" .. name)
-            else
-                table.insert(candidates, home .. "/Documents/STEMwerk/scripts/reaper/" .. name)
+        local map = {}
+        local function readMapFile(mapPath)
+            local f = io.open(mapPath, "r")
+            if not f then return end
+            local ok, data = pcall(function() return f:read("*a") end)
+            f:close()
+            if not (ok and data and data ~= "") then return end
+            for k, v in data:gmatch('"([^\"]+)"%s*:%s*"([^\"]+)"') do
+                map[k] = v
             end
         end
-        table.insert(candidates, name)
-        for _, mapPath in ipairs(candidates) do
-            local f = io.open(mapPath, "r")
-            if f then
-                local ok, data = pcall(function() return f:read("*a") end)
-                f:close()
-                if ok and data and data ~= "" then
-                    local map = {}
-                    for k, v in data:gmatch('"([^\"]+)"%s*:%s*"([^\"]+)"') do
-                        map[k] = v
-                    end
-                    return map
+
+        local names = {"directml_device_map.json", "device_mapping.json"}
+        for _, name in ipairs(names) do
+            local candidates = {}
+            if type(script_path) == "string" and script_path ~= "" then
+                table.insert(candidates, script_path .. name)
+                table.insert(candidates, script_path .. ".." .. PATH_SEP .. name)
+                table.insert(candidates, script_path .. ".." .. PATH_SEP .. ".." .. PATH_SEP .. name)
+            end
+            if type(repo_root) == "string" and repo_root ~= "" then
+                table.insert(candidates, repo_root .. "scripts" .. PATH_SEP .. "reaper" .. PATH_SEP .. name)
+                table.insert(candidates, repo_root .. name)
+            end
+            local home = getHome()
+            if home then
+                if PATH_SEP == "\\" then
+                    table.insert(candidates, home .. "\\Documents\\STEMwerk\\scripts\\reaper\\" .. name)
+                else
+                    table.insert(candidates, home .. "/Documents/STEMwerk/scripts/reaper/" .. name)
                 end
             end
+            table.insert(candidates, name)
+
+            for _, mapPath in ipairs(candidates) do
+                readMapFile(mapPath)
+            end
         end
+
+        if next(map) then return map end
         return nil
     end
     local deviceMap = loadDeviceMap() or {}
+    local function mappedDeviceName(id)
+        if not id or not deviceMap then return nil end
+        if deviceMap[id] then return deviceMap[id] end
+        local idx = tostring(id):match("^directml:(%d+)$")
+        if idx then
+            return deviceMap["privateuseone:" .. idx]
+        end
+        return nil
+    end
 
     -- If runtime probe returned only a minimal safe list (Auto/CPU),
     -- also expose the static DEVICES table so users can manually pick
@@ -10181,8 +10537,9 @@ local function dialogLoop()
                     else
                         local copy = { id = sd.id, name = sd.name, fullName = sd.name, uiName = sd.name, type = sd_type, desc = sd.desc }
                         -- Apply deviceMap if available so placeholders can show friendly names
-                        if deviceMap and deviceMap[sd.id] then
-                            copy.fullName = deviceMap[sd.id]
+                        local mapped = mappedDeviceName(sd.id)
+                        if mapped then
+                            copy.fullName = mapped
                             copy.uiName = sanitizeFriendlyName(copy.fullName) or copy.uiName
                         else
                             copy.uiName = sanitizeFriendlyName(copy.fullName) or copy.uiName
@@ -10197,7 +10554,8 @@ local function dialogLoop()
     -- Apply friendly names from deviceMap and sanitize labels for UI buttons.
     for _, d in ipairs(deviceList) do
         d.fullName = d.fullName or d.name
-        if deviceMap[d.id] then d.fullName = deviceMap[d.id] end
+        local mapped = mappedDeviceName(d.id)
+        if mapped then d.fullName = mapped end
         if d.id and (d.id:match("^cuda:%d+$") or d.id:match("^directml:%d+$") or d.type == "cuda" or d.type == "directml") then
             d.uiName = sanitizeFriendlyName(d.fullName or d.name)
         else
@@ -10210,6 +10568,28 @@ local function dialogLoop()
         deviceLabels[#deviceLabels + 1] = deviceList[i].uiName or deviceList[i].name
     end
     local deviceRadioFontSize = getUniformFontSizeCached("main_device_col", deviceLabels, deviceBoxW)
+    local function tightenFontSizeToFit(labels, boxW, fontSize)
+        local padding = S(4)
+        local availableW = (boxW or 0) - padding * 2
+        if availableW <= 0 then return fontSize end
+        local size = fontSize
+        local minSize = S(9)
+        while size > minSize do
+            gfx.setfont(1, "Arial", size)
+            local fits = true
+            for _, text in ipairs(labels or {}) do
+                local w = gfx.measurestr(tostring(text or ""))
+                if w > availableW then
+                    fits = false
+                    break
+                end
+            end
+            if fits then break end
+            size = size - 1
+        end
+        return size
+    end
+    deviceRadioFontSize = tightenFontSizeToFit(deviceLabels, deviceBoxW, deviceRadioFontSize)
     
     -- Device options with tooltips
     local deviceDescKeys = {
@@ -10251,7 +10631,7 @@ local function dialogLoop()
     for _, device in ipairs(deviceList) do
         local label = device.uiName or device.name
         -- Use theme accent color for the selected device (same as Model selection)
-        if drawRadio(col4X, deviceY, SETTINGS.device == device.id, label, nil, deviceBoxW, nil, nil, commonBtnFontSize) then
+        if drawRadio(col4X, deviceY, SETTINGS.device == device.id, label, nil, deviceBoxW, nil, nil, deviceRadioFontSize, true) then
             SETTINGS.device = device.id
             saveSettings()
         end
@@ -10552,7 +10932,6 @@ local function dialogLoop()
         end
         setTooltip(col5X, outY, outBoxW, btnH, T("tooltip_explode_in_order"))
     end
-
 
     -- Footer buttons + status bar
     local btnW = S(80)
@@ -11150,6 +11529,10 @@ end
 
 local function cleanupTempWorkDir(dir)
     if not dir or dir == "" then return end
+    if SETTINGS and SETTINGS.keepTempFiles then
+        debugLog("cleanupTempWorkDir: keepTempFiles enabled, skipping " .. tostring(dir))
+        return
+    end
     if not isSafeTempDir(dir) then
         debugLog("cleanupTempWorkDir: skip unsafe path " .. tostring(dir))
         return
@@ -12077,14 +12460,20 @@ local function drawProgressWindow()
     local themeY = PS(6)
     local themeHover = mx >= themeX and mx <= themeX + themeSize and my >= themeY and my <= themeY + themeSize
 
+    local controlsLeft = themeX - PS(60)
+    local controlsBottom = themeY + themeSize + PS(30)
+    local mouseInControls = (mx >= controlsLeft) and (my >= 0) and (my <= controlsBottom)
+    local controlsOpacity = updateControlsOpacity(progressState, mouseInControls)
+
     if SETTINGS.darkMode then
-        gfx.set(0.7, 0.7, 0.5, themeHover and 1 or 0.5)
+        gfx.set(0.7, 0.7, 0.5, (themeHover and 1 or 0.5) * controlsOpacity)
         gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/2 - 2, 1, 1)
-        gfx.set(0, 0, 0, 1)  -- Pure black for moon overlay
+        gfx.set(0, 0, 0, 1 * controlsOpacity)  -- Pure black for moon overlay
         gfx.circle(themeX + themeSize/2 + 3, themeY + themeSize/2 - 2, themeSize/2 - 3, 1, 1)
     else
-        gfx.set(0.9, 0.7, 0.2, themeHover and 1 or 0.7)
+        gfx.set(0.9, 0.7, 0.2, (themeHover and 1 or 0.7) * controlsOpacity)
         gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/3, 1, 1)
+        gfx.set(0.9, 0.7, 0.2, (themeHover and 1 or 0.7) * controlsOpacity)
         for i = 0, 7 do
             local angle = i * math.pi / 4
             local x1 = themeX + themeSize/2 + math.cos(angle) * (themeSize/3 + 1)
@@ -12096,10 +12485,13 @@ local function drawProgressWindow()
     end
 
     -- Theme click and tooltip
-    if themeHover then
+    if themeHover and controlsOpacity > 0.3 then
         GUI.uiClickedThisFrame = true
-        tooltipText = SETTINGS.darkMode and T("switch_light") or T("switch_dark")
+        tooltipText = getThemeToggleTooltip()
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
+        if rightMouseDown and not (progressState.wasRightMouseDown or false) then
+            cycleThemePreset()
+        end
         if mouseDown and not progressState.wasMouseDown then
             SETTINGS.darkMode = not SETTINGS.darkMode
             updateTheme()
@@ -12114,22 +12506,22 @@ local function drawProgressWindow()
     local langX = themeX - langW - PS(10)
     local langY = themeY + PS(3)
     local langHover = mx >= langX - PS(3) and mx <= langX + langW + PS(3) and my >= langY - PS(2) and my <= langY + PS(10)
-    gfx.set(0.5, 0.6, 0.8, langHover and 1 or 0.4)
+    gfx.set(0.5, 0.6, 0.8, (langHover and 1 or 0.4) * controlsOpacity)
     gfx.x = langX
     gfx.y = langY
     gfx.drawstr(langCode)
 
     -- Language tooltip and click
-    if langHover then
+    if langHover and controlsOpacity > 0.3 then
         GUI.uiClickedThisFrame = true
         tooltipText = T("tooltip_change_language")
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
     end
-    if langHover and rightMouseDown and not (progressState.wasRightMouseDown or false) then
+    if langHover and rightMouseDown and not (progressState.wasRightMouseDown or false) and controlsOpacity > 0.3 then
         SETTINGS.tooltips = not SETTINGS.tooltips
         saveSettings()
     end
-    if langHover and mouseDown and not progressState.wasMouseDown then
+    if langHover and mouseDown and not progressState.wasMouseDown and controlsOpacity > 0.3 then
         local langs = {"en", "nl", "de"}
         local currentIdx = 1
         for i, l in ipairs(langs) do
@@ -12146,7 +12538,7 @@ local function drawProgressWindow()
     local fxY = themeY + themeSize + PS(3)
     local fxHover = mx >= fxX - PS(2) and mx <= fxX + fxSize + PS(2) and my >= fxY - PS(2) and my <= fxY + fxSize + PS(2)
 
-    local fxAlpha = fxHover and 1 or 0.7
+    local fxAlpha = (fxHover and 1 or 0.7) * controlsOpacity
     if SETTINGS.visualFX then
         gfx.set(0.4, 0.9, 0.5, fxAlpha)
     else
@@ -12168,12 +12560,12 @@ local function drawProgressWindow()
         gfx.line(fxX - PS(1), fxY + fxSize / 2, fxX + fxSize + PS(1), fxY + fxSize / 2)
     end
 
-    if fxHover then
+    if fxHover and controlsOpacity > 0.3 then
         GUI.uiClickedThisFrame = true
         tooltipText = SETTINGS.visualFX and T("fx_disable") or T("fx_enable")
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
     end
-    if fxHover and mouseDown and not progressState.wasMouseDown then
+    if fxHover and mouseDown and not progressState.wasMouseDown and controlsOpacity > 0.3 then
         SETTINGS.visualFX = not SETTINGS.visualFX
         saveSettings()
     end
@@ -12289,14 +12681,25 @@ local function drawProgressWindow()
         end
     end
 
+    local function drawProgressText(text, x, y, alpha)
+        alpha = alpha or 1
+        gfx.set(0, 0, 0, 0.6 * alpha)
+        gfx.x, gfx.y = x + 1, y + 1; gfx.drawstr(text)
+        gfx.x, gfx.y = x - 1, y + 1; gfx.drawstr(text)
+        gfx.x, gfx.y = x + 1, y - 1; gfx.drawstr(text)
+        gfx.x, gfx.y = x - 1, y - 1; gfx.drawstr(text)
+        gfx.set(1, 1, 1, alpha)
+        gfx.x, gfx.y = x, y
+        gfx.drawstr(text)
+    end
+
     -- Progress percentage in center of bar
     gfx.setfont(1, "Arial", PS(14), string.byte('b'))
     local percentText = string.format("%d%%", progressState.percent)
     local tw = gfx.measurestr(percentText)
-    gfx.set(1, 1, 1, 1)
-    gfx.x = barX + (barW - tw) / 2
-    gfx.y = barY + (barH - PS(14)) / 2
-    gfx.drawstr(percentText)
+    local px = barX + (barW - tw) / 2
+    local py = barY + (barH - PS(14)) / 2
+    drawProgressText(percentText, px, py, 1)
 
     -- Stage text
     gfx.setfont(1, "Arial", PS(11))
@@ -15060,14 +15463,20 @@ function drawMultiTrackProgressWindow()
     local themeY = PS(6)
     local themeHover = mx >= themeX and mx <= themeX + themeSize and my >= themeY and my <= themeY + themeSize
 
+    local controlsLeft = themeX - PS(60)
+    local controlsBottom = themeY + themeSize + PS(30)
+    local mouseInControls = (mx >= controlsLeft) and (my >= 0) and (my <= controlsBottom)
+    local controlsOpacity = updateControlsOpacity(multiTrackQueue, mouseInControls)
+
     if SETTINGS.darkMode then
-        gfx.set(0.7, 0.7, 0.5, themeHover and 1 or 0.5)
+        gfx.set(0.7, 0.7, 0.5, (themeHover and 1 or 0.5) * controlsOpacity)
         gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/2 - 2, 1, 1)
-        gfx.set(0, 0, 0, 1)  -- Pure black for moon overlay
+        gfx.set(0, 0, 0, 1 * controlsOpacity)  -- Pure black for moon overlay
         gfx.circle(themeX + themeSize/2 + 3, themeY + themeSize/2 - 2, themeSize/2 - 3, 1, 1)
     else
-        gfx.set(0.9, 0.7, 0.2, themeHover and 1 or 0.7)
+        gfx.set(0.9, 0.7, 0.2, (themeHover and 1 or 0.7) * controlsOpacity)
         gfx.circle(themeX + themeSize/2, themeY + themeSize/2, themeSize/3, 1, 1)
+        gfx.set(0.9, 0.7, 0.2, (themeHover and 1 or 0.7) * controlsOpacity)
         for i = 0, 7 do
             local angle = i * math.pi / 4
             local x1 = themeX + themeSize/2 + math.cos(angle) * (themeSize/3 + 1)
@@ -15079,10 +15488,13 @@ function drawMultiTrackProgressWindow()
     end
 
     -- Theme click and tooltip
-    if themeHover then
+    if themeHover and controlsOpacity > 0.3 then
         GUI.uiClickedThisFrame = true
-        tooltipText = SETTINGS.darkMode and T("switch_light") or T("switch_dark")
+        tooltipText = getThemeToggleTooltip()
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
+        if rightMouseDown and not (multiTrackQueue.wasRightMouseDown or false) then
+            cycleThemePreset()
+        end
         if mouseDown and not multiTrackQueue.wasMouseDown then
             SETTINGS.darkMode = not SETTINGS.darkMode
             updateTheme()
@@ -15096,7 +15508,7 @@ function drawMultiTrackProgressWindow()
     local fxY = themeY + themeSize + PS(3)
     local fxHover = mx >= fxX - PS(2) and mx <= fxX + fxSize + PS(2) and my >= fxY - PS(2) and my <= fxY + fxSize + PS(2)
 
-    local fxAlpha = fxHover and 1 or 0.7
+    local fxAlpha = (fxHover and 1 or 0.7) * controlsOpacity
     if SETTINGS.visualFX then
         gfx.set(0.4, 0.9, 0.5, fxAlpha)
     else
@@ -15118,12 +15530,12 @@ function drawMultiTrackProgressWindow()
         gfx.line(fxX - PS(1), fxY + fxSize / 2, fxX + fxSize + PS(1), fxY + fxSize / 2)
     end
 
-    if fxHover then
+    if fxHover and controlsOpacity > 0.3 then
         GUI.uiClickedThisFrame = true
         tooltipText = SETTINGS.visualFX and T("fx_disable") or T("fx_enable")
         tooltipX, tooltipY = mx + PS(10), my + PS(15)
     end
-    if fxHover and mouseDown and not multiTrackQueue.wasMouseDown then
+    if fxHover and mouseDown and not multiTrackQueue.wasMouseDown and controlsOpacity > 0.3 then
         SETTINGS.visualFX = not SETTINGS.visualFX
         saveSettings()
     end
@@ -15172,26 +15584,28 @@ function drawMultiTrackProgressWindow()
 
     if langHover then
         GUI.uiClickedThisFrame = true
-        gfx.set(0.4, 0.6, 0.9, 1)
-        tooltipText = T("tooltip_change_language")
-        tooltipX, tooltipY = mx + PS(10), my + PS(15)
-        if rightMouseDown and not (multiTrackQueue.wasRightMouseDown or false) then
-            SETTINGS.tooltips = not SETTINGS.tooltips
-            saveSettings()
-        end
-        if mouseDown and not multiTrackQueue.wasMouseDown then
-            -- Cycle through languages
-            local langs = {"en", "nl", "de"}
-            local currentIdx = 1
-            for i, l in ipairs(langs) do
-                if l == SETTINGS.language then currentIdx = i; break end
+        gfx.set(0.4, 0.6, 0.9, 1 * controlsOpacity)
+        if controlsOpacity > 0.3 then
+            tooltipText = T("tooltip_change_language")
+            tooltipX, tooltipY = mx + PS(10), my + PS(15)
+            if rightMouseDown and not (multiTrackQueue.wasRightMouseDown or false) then
+                SETTINGS.tooltips = not SETTINGS.tooltips
+                saveSettings()
             end
-            local nextIdx = (currentIdx % #langs) + 1
-            setLanguage(langs[nextIdx])
-            saveSettings()
+            if mouseDown and not multiTrackQueue.wasMouseDown then
+                -- Cycle through languages
+                local langs = {"en", "nl", "de"}
+                local currentIdx = 1
+                for i, l in ipairs(langs) do
+                    if l == SETTINGS.language then currentIdx = i; break end
+                end
+                local nextIdx = (currentIdx % #langs) + 1
+                setLanguage(langs[nextIdx])
+                saveSettings()
+            end
         end
     else
-        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 0.8)
+        gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 0.8 * controlsOpacity)
     end
     gfx.x = langX + (langW - langTextW) / 2
     gfx.y = langY
@@ -15273,14 +15687,25 @@ function drawMultiTrackProgressWindow()
         end
     end
 
+    local function drawProgressText(text, x, y, alpha)
+        alpha = alpha or 1
+        gfx.set(0, 0, 0, 0.6 * alpha)
+        gfx.x, gfx.y = x + 1, y + 1; gfx.drawstr(text)
+        gfx.x, gfx.y = x - 1, y + 1; gfx.drawstr(text)
+        gfx.x, gfx.y = x + 1, y - 1; gfx.drawstr(text)
+        gfx.x, gfx.y = x - 1, y - 1; gfx.drawstr(text)
+        gfx.set(1, 1, 1, alpha)
+        gfx.x, gfx.y = x, y
+        gfx.drawstr(text)
+    end
+
     -- Progress text
     gfx.setfont(1, "Arial", PS(11))
-    gfx.set(1, 1, 1, 1)
     local progText = string.format("%d%%", overallProgress)
     local progW = gfx.measurestr(progText)
-    gfx.x = barX + (barW - progW) / 2
-    gfx.y = barY + PS(3)
-    gfx.drawstr(progText)
+    local progX = barX + (barW - progW) / 2
+    local progY = barY + PS(3)
+    drawProgressText(progText, progX, progY, 1)
 
     -- === NERD TERMINAL TOGGLE BUTTON (always available; like sequential Processing window) ===
     local nerdBtnW = PS(22)
@@ -15618,17 +16043,18 @@ function drawMultiTrackProgressWindow()
             -- Stage text inside progress bar
             if not job.done and job.stage and job.stage ~= "" then
                 gfx.setfont(1, "Arial", PS(9))
-                gfx.set(1, 1, 1, 0.95)
                 local stageText = job.stage
                 if stageText == "Waiting.." or stageText == "Waiting..." then
                     stageText = T("waiting") or stageText
                 elseif stageText == "Starting.." or stageText == "Starting..." then
                     stageText = T("starting") or stageText
                 end
-                if #stageText > 35 then stageText = stageText:sub(1, 32) .. ".." end
-                gfx.x = tBarX + PS(5)
-                gfx.y = yPos + PS(3)
-                gfx.drawstr(stageText)
+                local stageX = tBarX + PS(5)
+                local stageY = yPos + PS(3)
+                stageText = stageText:gsub("Direct ML", "DML")
+                stageText = stageText:gsub("DirectML", "DML")
+                local fittedStageText = fitTextToBox(stageText, tBarW - PS(10), PS(9), PS(9))
+                drawProgressText(fittedStageText, stageX, stageY, 0.95)
             end
 
             -- Done checkmark or percentage
@@ -15936,11 +16362,12 @@ processAllStemsResult = function()
     -- Skip item-level processing if deleteOriginalTrack is set (tracks will be deleted after stems created)
     -- Also skip muteSelection/deleteSelection for in-place + time selection mode
     -- (the selection portion will be replaced by stems, splitting is done there)
+    local applyCleanup = SETTINGS.createNewTracks
     local skipSelectionProcessing = timeSelectionMode and not SETTINGS.createNewTracks
 
-    if SETTINGS.deleteOriginalTrack then
+    if applyCleanup and SETTINGS.deleteOriginalTrack then
         -- Do nothing here - track deletion happens after stems are created
-    elseif SETTINGS.muteOriginal and not skipSelectionProcessing then
+    elseif applyCleanup and SETTINGS.muteOriginal and not skipSelectionProcessing then
         -- Mute all source items from all jobs
         for _, item in ipairs(allItems) do
             if reaper.ValidatePtr(item, "MediaItem*") then
@@ -15951,7 +16378,7 @@ processAllStemsResult = function()
         local itemWord = actionCount == 1 and (T("footer_item") or "item") or (T("footer_items") or "items")
         actionMsg = "\n" .. string.format(T("result_action_muted") or "%d %s muted.", actionCount, itemWord)
         actionData = { kind = "items", key = "result_action_muted", count = actionCount }
-    elseif SETTINGS.muteSelection and not skipSelectionProcessing then
+    elseif applyCleanup and SETTINGS.muteSelection and not skipSelectionProcessing then
         -- Mute selection portion of all source items
         -- Process in reverse order to avoid item index shifting issues
         for i = #allItems, 1, -1 do
@@ -15999,7 +16426,7 @@ processAllStemsResult = function()
         local itemWord = actionCount == 1 and (T("footer_item") or "item") or (T("footer_items") or "items")
         actionMsg = "\n" .. string.format(T("result_action_selection_muted") or "Selection muted in %d %s.", actionCount, itemWord)
         actionData = { kind = "items", key = "result_action_selection_muted", count = actionCount }
-    elseif SETTINGS.deleteOriginal then
+    elseif applyCleanup and SETTINGS.deleteOriginal then
         -- Delete all source items from all jobs
         -- Process in reverse order to avoid index shifting issues
         for i = #allItems, 1, -1 do
@@ -16015,7 +16442,7 @@ processAllStemsResult = function()
         local itemWord = actionCount == 1 and (T("footer_item") or "item") or (T("footer_items") or "items")
         actionMsg = "\n" .. string.format(T("result_action_deleted") or "%d %s deleted.", actionCount, itemWord)
         actionData = { kind = "items", key = "result_action_deleted", count = actionCount }
-    elseif SETTINGS.deleteSelection and not skipSelectionProcessing then
+    elseif applyCleanup and SETTINGS.deleteSelection and not skipSelectionProcessing then
         -- Delete selection portion of all source items
         -- Process in reverse order to avoid item index shifting issues
         for i = #allItems, 1, -1 do
@@ -16250,7 +16677,7 @@ processAllStemsResult = function()
     end
 
     -- Handle deleteOriginalTrack AFTER stems are created (deletes entire source tracks)
-    if SETTINGS.deleteOriginalTrack then
+    if applyCleanup and SETTINGS.deleteOriginalTrack then
         -- Collect unique tracks from jobs (delete in reverse order to avoid index issues)
         local tracksToDelete = {}
         for _, job in ipairs(multiTrackQueue.jobs) do
