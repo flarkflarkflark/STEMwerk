@@ -18,6 +18,9 @@ This file is intentionally tracked in git so "what's next" survives VS Code / Co
 - [ ] Re-test REAPER UI scaling/status
 - [x] Confirm DirectML/device options docs
 - [ ] Help: add "Reaper" menu entry with a page for temp files + settings
+	- Explain temp/log/stem file locations and lifecycle
+	- Add configurable cleanup policy (keep vs delete after import/save)
+	- Note REAPER media copy behavior so users choose safely
 
 - [ ] REAPER progress/complete UI polish
 	- [x] Progress: model badge aligned with progress bar (no overflow)
@@ -36,6 +39,7 @@ This file is intentionally tracked in git so "what's next" survives VS Code / Co
 	- [x] Time selection + "Mute sel": if nothing is selected, operate on overlapping items (auto semantics)
 
 - [ ] REAPER UI: merge language/day-night/FX into 1 icon + add TT (tooltips) toggle
+	- Auto-hide quick icons until hover (like help pages)
 
 - [ ] Linux AMD GPUs: ROCm support (if hardware/driver supports it)
 	- Detect ROCm availability (e.g. `/opt/rocm`, `torch.version.hip`, `rocminfo`)
