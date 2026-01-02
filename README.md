@@ -1,5 +1,9 @@
 # STEMwerk
 
+<p align="center">
+  <img src="docs/assets/stemwerk-dynamic.svg" alt="STEMwerk dynamic logo" width="900">
+</p>
+
 STEMwerk is a REAPER script that runs **Demucs-based stem separation** via a Python worker, with a REAPER-native UI, progress windows, debug logging, and **capability-driven device selection** (CPU / CUDA / ROCm / DirectML / MPS when available).
 
 ## Python interpreter: cross-platform & fallback
@@ -76,3 +80,8 @@ Logs:
 ## Benchmarks
 Benchmark notes live here:
 - `tests/bench_results/README.md`
+
+## Local artifacts
+Keep local build outputs and downloads in `local/` (ignored by git).
+Suggested subfolders: `local/artifacts/`, `local/ffmpeg/`, `local/tmp/`, `local/audio/`, `local/vscode/`.
+Keep `.venv` and `.venv-gpu` at repo root so the script can auto-detect them.
