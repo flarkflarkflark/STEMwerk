@@ -81,6 +81,14 @@ Logs:
 Benchmark notes live here:
 - `tests/bench_results/README.md`
 
+## Release notes labels
+For auto-generated release notes, label PRs/changes with:
+- `breaking`, `feature`, `enhancement`
+- `bug` / `fix`
+- `chore`, `refactor`
+- `docs`
+- `skip-release-notes` (exclude from release notes)
+
 ## Local artifacts
 Keep local build outputs and downloads in `local/` (ignored by git).
 Suggested subfolders: `local/artifacts/`, `local/ffmpeg/`, `local/tmp/`, `local/audio/`, `local/vscode/`.
