@@ -97,14 +97,74 @@ local function quoteArg(s)
     return s
 end
 
-local function execProcess(cmd, timeoutMs)
+local function shellQuoteSingle(s)
+    return "'" .. tostring(s):gsub("'", "'\"'\"'") .. "'"
+end
+
+local function isFlatpak()
+    local id = os.getenv("FLATPAK_ID")
+    if id and id ~= "" then return true end
+    local container = os.getenv("container")
+    if container and container:lower():find("flatpak") then return true end
+    return false
+end
+
+local function getFlatpakTempBase()
+    if not isFlatpak() then return nil end
+    local home = os.getenv("HOME") or "/tmp"
+    return home .. "/.cache/STEMwerk"
+end
+
+local function exec_capture(cmd, timeoutMs)
     timeoutMs = timeoutMs or 8000
     if reaper and reaper.ExecProcess then
         local rc, out = reaper.ExecProcess(cmd, timeoutMs)
-        return tonumber(rc) or -1, out or ""
+        out = out or ""
+        if out ~= "" then
+            return tonumber(rc) or -1, out
+        end
+        if isFlatpak() and OS ~= "Windows" then
+            debugLog("exec_capture: ExecProcess empty -> flatpak sandbox file fallback")
+            local home = os.getenv("HOME") or ""
+            local sep = PATH_SEP or "/"
+            local cachePath = home .. sep .. ".cache" .. sep .. "stemwerk_exec_out.txt"
+            local inner = "mkdir -p $HOME/.cache && " .. cmd .. " > $HOME/.cache/stemwerk_exec_out.txt 2>&1"
+            local sandboxCmd = "sh -lc " .. shellQuoteSingle(inner)
+            local rc2 = reaper.ExecProcess(sandboxCmd, timeoutMs)
+            local f = io.open(cachePath, "r")
+            local content = ""
+            if f then
+                content = f:read("*a") or ""
+                f:close()
+                os.remove(cachePath)
+            end
+            if content ~= "" then
+                return tonumber(rc2) or tonumber(rc) or -1, content
+            end
+            debugLog("exec_capture: sandbox fallback empty -> flatpak-spawn host fallback")
+            local hostCmd = "flatpak-spawn --host sh -lc " .. shellQuoteSingle(inner)
+            local rc3 = reaper.ExecProcess(hostCmd, timeoutMs)
+            local f2 = io.open(cachePath, "r")
+            local content2 = ""
+            if f2 then
+                content2 = f2:read("*a") or ""
+                f2:close()
+                os.remove(cachePath)
+            end
+            if content2 ~= "" then
+                return tonumber(rc3) or tonumber(rc) or -1, content2
+            end
+        end
+        return tonumber(rc) or -1, out
     end
     local ok = os.execute(cmd)
     return (ok == true or ok == 0) and 0 or 1, ""
+end
+
+local function execProcess(cmd, timeoutMs)
+    timeoutMs = timeoutMs or 8000
+    local rc, out = exec_capture(cmd, timeoutMs)
+    return tonumber(rc) or -1, out or ""
 end
 
 local function canRunPython(pythonCmd)
@@ -193,7 +253,7 @@ local DEBUG_LOG_PATH = nil  -- Set during init
 local function debugLog(msg)
     if not DEBUG_MODE then return end
     if not DEBUG_LOG_PATH then
-        local tempDir = os.getenv("TEMP") or os.getenv("TMP") or os.getenv("TMPDIR") or "/tmp"
+        local tempDir = getFlatpakTempBase() or os.getenv("TEMP") or os.getenv("TMP") or os.getenv("TMPDIR") or "/tmp"
         DEBUG_LOG_PATH = tempDir .. (package.config:sub(1,1) == "\\" and "\\" or "/") .. "STEMwerk_debug.log"
     end
     local f = io.open(DEBUG_LOG_PATH, "a")
@@ -203,10 +263,30 @@ local function debugLog(msg)
     end
 end
 
+local function debugCudaProbe()
+    if not DEBUG_MODE then return end
+    local py = getExtStateValue("pythonPath") or "/var/home/bazzite/.STEMwerk/.venv/bin/python"
+    if not isAbsolutePath(py) then
+        py = script_path .. py
+    end
+    if not fileExists(py) then
+        debugLog("debugCudaProbe: python not found at " .. tostring(py))
+        return
+    end
+    local cmd = quoteArg(py) .. ' -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.device_count()); print(torch.cuda.get_device_name(0))"'
+    local rc, out = exec_capture(cmd, 20000)
+    debugLog("debugCudaProbe rc=" .. tostring(rc))
+    debugLog("debugCudaProbe out:\n" .. tostring(out))
+    if reaper and reaper.ShowConsoleMsg then
+        reaper.ShowConsoleMsg("STEMwerk debugCudaProbe rc=" .. tostring(rc) .. "\n")
+        reaper.ShowConsoleMsg("STEMwerk debugCudaProbe out:\n" .. tostring(out) .. "\n")
+    end
+end
+
 -- Clear debug log on script start
 local function clearDebugLog()
     if not DEBUG_MODE then return end
-    local tempDir = os.getenv("TEMP") or os.getenv("TMP") or os.getenv("TMPDIR") or "/tmp"
+    local tempDir = getFlatpakTempBase() or os.getenv("TEMP") or os.getenv("TMP") or os.getenv("TMPDIR") or "/tmp"
     DEBUG_LOG_PATH = tempDir .. (package.config:sub(1,1) == "\\" and "\\" or "/") .. "STEMwerk_debug.log"
     local f = io.open(DEBUG_LOG_PATH, "w")
     if f then
@@ -218,6 +298,7 @@ end
 
 clearDebugLog()
 debugLog("Script loaded")
+debugCudaProbe()
 
 -- Lightweight performance markers (only when DEBUG_MODE is enabled).
 PERF_T0 = os.clock()
@@ -828,6 +909,8 @@ function startRuntimeDeviceProbeAsync(force)
         if OS == "Windows" then
             return os.getenv("TEMP") or os.getenv("TMP") or "C:\\Temp"
         end
+        local flatpakTemp = getFlatpakTempBase()
+        if flatpakTemp then return flatpakTemp end
         return os.getenv("TMPDIR") or "/tmp"
     end
     local function makeDirEarly(path)
@@ -1011,11 +1094,11 @@ local function refreshRuntimeDevices(force)
     local PROBE_TIMEOUT_MS = 30000
 
     -- Exec/capture helper: REAPER's ExecProcess sometimes returns empty output on some systems.
-    -- For probing, we can safely fall back to io.popen to capture stdout/stderr.
+    -- For probing, we can safely fall back to flatpak-spawn file capture or io.popen.
     local function execCapture(cmd, timeoutMs)
-        local rc, out = execProcess(cmd, timeoutMs)
+        local rc, out = exec_capture(cmd, timeoutMs)
         out = out or ""
-        debugLog("  probe execProcess rc=" .. tostring(rc) .. " outLen=" .. tostring(#out))
+        debugLog("  probe execCapture rc=" .. tostring(rc) .. " outLen=" .. tostring(#out))
         if out ~= "" then
             return rc, out
         end
@@ -1031,7 +1114,9 @@ local function refreshRuntimeDevices(force)
                 else
                     rc = rc or -1
                 end
-                debugLog("  probe io.popen rc=" .. tostring(rc) .. " outLen=" .. tostring(#content))
+                if content ~= "" then
+                    debugLog("  probe io.popen used (rc=" .. tostring(rc) .. " outLen=" .. tostring(#content) .. ")")
+                end
                 return rc, content
             end
         end
@@ -1109,6 +1194,8 @@ if env.get('directml_possible'):
             if OS == "Windows" then
                 return os.getenv("TEMP") or os.getenv("TMP") or "C:\\Temp"
             end
+            local flatpakTemp = getFlatpakTempBase()
+            if flatpakTemp then return flatpakTemp end
             return os.getenv("TMPDIR") or "/tmp"
         end
         local function makeDirEarly(path)
@@ -1281,53 +1368,96 @@ local LANG = nil  -- Current language table
 
 -- Load language file
 local function loadLanguages()
-    -- Prefer the wrapper, which returns a LANGUAGES table.
-    local wrapper_file = script_path .. ".." .. PATH_SEP .. ".." .. PATH_SEP .. "i18n" .. PATH_SEP .. "stemwerk_language_wrapper.lua"
-    local f = io.open(wrapper_file, "r")
-    if f then
-        f:close()
-        local ok, result = pcall(dofile, wrapper_file)
-        if ok and type(result) == "table" then
-            LANGUAGES = result
-            debugLog("Loaded languages from " .. wrapper_file)
-            return true
-        else
-            debugLog("Failed to load languages via wrapper: " .. tostring(result))
+    local function pathJoin(a, b)
+        if a == "" then return b end
+        local last = a:sub(-1)
+        if last == "/" or last == "\\" then
+            return a .. b
         end
-    else
-        debugLog("Language wrapper not found: " .. wrapper_file)
+        return a .. PATH_SEP .. b
+    end
+
+    local function getActionScriptDir()
+        if reaper and reaper.get_action_context then
+            local _, _, _, _, _, ctx = reaper.get_action_context()
+            if type(ctx) == "string" and ctx ~= "" then
+                local dir = ctx:match("@?(.*[/\\])")
+                if dir and dir ~= "" then return dir end
+            end
+        end
+        return script_path or ""
+    end
+
+    local baseDir = getActionScriptDir()
+    local bases = {
+        baseDir,
+        pathJoin(baseDir, ".."),
+        pathJoin(baseDir, ".." .. PATH_SEP .. ".."),
+    }
+
+    local function buildCandidates(filename)
+        local candidates, seen = {}, {}
+        for _, base in ipairs(bases) do
+            local p = pathJoin(base, "i18n" .. PATH_SEP .. filename)
+            if not seen[p] then
+                candidates[#candidates + 1] = p
+                seen[p] = true
+            end
+        end
+        return candidates
+    end
+
+    local triedWrapper, triedLang = {}, {}
+
+    -- Prefer the wrapper, which returns a LANGUAGES table.
+    for _, wrapper_file in ipairs(buildCandidates("stemwerk_language_wrapper.lua")) do
+        triedWrapper[#triedWrapper + 1] = wrapper_file
+        local f = io.open(wrapper_file, "r")
+        if f then
+            f:close()
+            local ok, result = pcall(dofile, wrapper_file)
+            if ok and type(result) == "table" then
+                LANGUAGES = result
+                debugLog("Loaded languages from " .. wrapper_file)
+                return true
+            else
+                debugLog("Failed to load languages via wrapper: " .. tostring(result))
+            end
+        end
     end
 
     -- Fallback: parse i18n/languages.lua (which defines `local LANGUAGES = {..}`).
-    local lang_file = script_path .. ".." .. PATH_SEP .. ".." .. PATH_SEP .. "i18n" .. PATH_SEP .. "languages.lua"
-    f = io.open(lang_file, "r")
-    if f then
-        local content = f:read("*all")
-        f:close()
+    for _, lang_file in ipairs(buildCandidates("languages.lua")) do
+        triedLang[#triedLang + 1] = lang_file
+        local f = io.open(lang_file, "r")
+        if f then
+            local content = f:read("*all")
+            f:close()
 
-        local table_str = content:match("local%s+LANGUAGES%s*=%s*(%b{})")
-        if table_str then
-            local env = {}
-            local chunk, err = load("LANGUAGES = " .. table_str, "languages", "t", env)
-            if chunk then
-                local ok, result = pcall(chunk)
-                if ok and env.LANGUAGES then
-                    LANGUAGES = env.LANGUAGES
-                    debugLog("Loaded languages from " .. lang_file)
-                    return true
+            local table_str = content:match("local%s+LANGUAGES%s*=%s*(%b{})")
+            if table_str then
+                local env = {}
+                local chunk, err = load("LANGUAGES = " .. table_str, "languages", "t", env)
+                if chunk then
+                    local ok, result = pcall(chunk)
+                    if ok and env.LANGUAGES then
+                        LANGUAGES = env.LANGUAGES
+                        debugLog("Loaded languages from " .. lang_file)
+                        return true
+                    else
+                        debugLog("Failed to execute language table: " .. tostring(result))
+                    end
                 else
-                    debugLog("Failed to execute language table: " .. tostring(result))
+                    debugLog("Failed to parse language table: " .. tostring(err))
                 end
             else
-                debugLog("Failed to parse language table: " .. tostring(err))
+                debugLog("Could not extract LANGUAGES table from file: " .. lang_file)
             end
-        else
-            debugLog("Could not extract LANGUAGES table from file: " .. lang_file)
         end
-    else
-        debugLog("Language file not found: " .. lang_file)
     end
 
+    debugLog("i18n files not found. Tried wrapper paths: " .. table.concat(triedWrapper, "; "))
+    debugLog("i18n files not found. Tried language paths: " .. table.concat(triedLang, "; "))
     return false
 end
 
@@ -11473,6 +11603,8 @@ local function getTempDir()
     if OS == "Windows" then
         return os.getenv("TEMP") or os.getenv("TMP") or "C:\\Temp"
     else
+        local flatpakTemp = getFlatpakTempBase()
+        if flatpakTemp then return flatpakTemp end
         return os.getenv("TMPDIR") or "/tmp"
     end
 end
@@ -11522,8 +11654,10 @@ local function isSafeTempDir(path)
     if not path or path == "" then return false end
     local base = normalizePath(getTempDir())
     local p = normalizePath(path)
-    if base ~= "" and p:sub(1, #base) ~= base then return false end
-    if not p:find("stemwerk", 1, true) then return false end
+    local baseLower = base:lower()
+    local pLower = p:lower()
+    if base ~= "" and pLower:sub(1, #baseLower) ~= baseLower then return false end
+    if not pLower:find("stemwerk", 1, true) then return false end
     return true
 end
 
