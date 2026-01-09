@@ -1,0 +1,69 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: Audio Separator Process",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/reaper/audio_separator_process.py",
+      "args": [
+        "--input", "${input:audioFile}",
+        "--output", "${workspaceFolder}/local/output",
+        "--model", "htdemucs",
+        "--stems", "vocals,drums,bass,other"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false
+    },
+    {
+      "name": "Python: GPU Check",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/gpu_check.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Python: GPU Installer",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/gpu_installer.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Python: Stress Benchmark",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/stress_bench.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Python: Run Tests",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["tests/", "-v"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Python: Debug Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "audioFile",
+      "type": "promptString",
+      "description": "Path to input audio file",
+      "default": "test.wav"
+    }
+  ]
+}

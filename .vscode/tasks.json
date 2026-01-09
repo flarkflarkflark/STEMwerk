@@ -5,6 +5,115 @@
       "label": "Lua syntax check",
       "type": "shell",
       "command": "luac -p ${file}",
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "Lua: Check all scripts",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-c",
+        "find scripts/reaper -name '*.lua' -exec luac -p {} \\; && find i18n -name '*.lua' -exec luac -p {} \\;"
+      ],
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "windows": {
+        "command": "powershell",
+        "args": [
+          "-Command",
+          "Get-ChildItem -Recurse -Filter *.lua scripts/reaper,i18n | ForEach-Object { luac -p $_.FullName }"
+        ]
+      }
+    },
+    {
+      "label": "Python: Run all tests",
+      "type": "shell",
+      "command": "python",
+      "args": ["-m", "pytest", "tests/", "-v"],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "Python: Run i18n tests",
+      "type": "shell",
+      "command": "python",
+      "args": ["-m", "pytest", "tests/i18n/", "-v"],
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "Python: GPU check",
+      "type": "shell",
+      "command": "python",
+      "args": ["tools/gpu_check.py"],
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "Python: Run stress benchmark",
+      "type": "shell",
+      "command": "python",
+      "args": ["tools/stress_bench.py"],
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "Python: Install GPU support",
+      "type": "shell",
+      "command": "python",
+      "args": ["tools/gpu_installer.py"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "Python: Validate audio separator",
+      "type": "shell",
+      "command": "python",
+      "args": ["-c", "from audio_separator.separator import Separator; print('audio-separator OK')"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "Dev: Full validation",
+      "dependsOn": [
+        "Lua: Check all scripts",
+        "Python: Run all tests"
+      ],
+      "dependsOrder": "sequence",
       "group": {
         "kind": "build",
         "isDefault": true

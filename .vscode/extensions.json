@@ -1,0 +1,13 @@
+{
+  "recommendations": [
+    "ms-python.python",
+    "ms-python.debugpy",
+    "ms-python.vscode-pylance",
+    "sumneko.lua",
+    "actboy168.lua-debug",
+    "editorconfig.editorconfig",
+    "eamodio.gitlens",
+    "redhat.vscode-yaml"
+  ],
+  "unwantedRecommendations": []
+}

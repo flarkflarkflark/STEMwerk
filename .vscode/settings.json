@@ -1,0 +1,31 @@
+{
+  "files.associations": {
+    "*.lua": "lua"
+  },
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/scripts/reaper",
+    "${workspaceFolder}/tools"
+  ],
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": [
+    "tests"
+  ],
+  "python.testing.unittestEnabled": false,
+  "Lua.diagnostics.globals": [
+    "reaper",
+    "gfx"
+  ],
+  "Lua.runtime.version": "Lua 5.4",
+  "Lua.workspace.library": [],
+  "editor.formatOnSave": false,
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true,
+    "local/": false
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/__pycache__": true,
+    "local/output/**": true
+  }
+}
