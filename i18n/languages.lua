@@ -314,6 +314,8 @@ local LANGUAGES = {
         -- Reaper files tab
         help_reaper_title = "REAPER Files & Cleanup",
         help_reaper_sub = "How STEMwerk handles temp folders and logs",
+        help_reaper_selection_title = "Selection Rules",
+        help_reaper_selection_body = "Time selection is used only when no items or tracks are selected. If items are selected, STEMwerk processes the full items even when a time selection exists. If tracks are selected, items on those tracks are processed (full items).",
         help_reaper_temp_title = "Temporary Work Folder",
         help_reaper_temp_body = "During separation, STEMwerk renders a temporary input file and writes outputs to a STEMwerk_* folder inside your system temp directory. These files are safe to delete after REAPER has imported the stems.",
         help_reaper_logs_title = "Logs and Diagnostics",
@@ -645,6 +647,8 @@ local LANGUAGES = {
         -- Reaper files tab
         help_reaper_title = "REAPER-bestanden",
         help_reaper_sub = "Hoe STEMwerk omgaat met temp mappen en logs",
+        help_reaper_selection_title = "Selectieregels",
+        help_reaper_selection_body = "Tijdselectie wordt alleen gebruikt als er geen items en geen tracks geselecteerd zijn. Als items geselecteerd zijn, verwerkt STEMwerk volledige items, ook met tijdselectie. Als tracks geselecteerd zijn, worden items op die tracks volledig verwerkt.",
         help_reaper_temp_title = "Tijdelijke werkmap",
         help_reaper_temp_body = "Tijdens het scheiden maakt STEMwerk een tijdelijke input en schrijft outputs naar een STEMwerk_* map in je systeemtemp. Deze bestanden kun je verwijderen zodra REAPER de stems heeft ingeladen.",
         help_reaper_logs_title = "Logs en diagnose",
@@ -976,6 +980,8 @@ local LANGUAGES = {
         -- Reaper files tab
         help_reaper_title = "REAPER-Dateien",
         help_reaper_sub = "Wie STEMwerk Temp-Ordner und Logs handhabt",
+        help_reaper_selection_title = "Auswahlregeln",
+        help_reaper_selection_body = "Zeitbereich wird nur verwendet, wenn keine Items oder Tracks ausgewaehlt sind. Bei ausgewaehlten Items verarbeitet STEMwerk die kompletten Items, auch wenn ein Zeitbereich existiert. Bei ausgewaehlten Tracks werden die Items auf diesen Tracks vollstaendig verarbeitet.",
         help_reaper_temp_title = "Temporaerer Arbeitsordner",
         help_reaper_temp_body = "Waerend der Trennung erstellt STEMwerk eine temporaere Eingabe und schreibt Ausgaben in einen STEMwerk_* Ordner im System-Temp. Diese Dateien koennen geloescht werden, sobald REAPER die Stems geladen hat.",
         help_reaper_logs_title = "Logs und Diagnose",
