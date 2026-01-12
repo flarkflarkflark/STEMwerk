@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 -u
+#!/home/flark/STEMwerk/.venv/bin/python -u
 """
 Audio Separator Script for STEMwerk
 Uses audio-separator library for high-quality AI stem separation.
@@ -37,6 +37,7 @@ import os
 import argparse
 import json
 import importlib
+import importlib.util
 import platform
 import subprocess
 from pathlib import Path
@@ -129,6 +130,42 @@ def get_available_devices():
     
     try:
         import torch
+        def _windows_gpu_names():
+            if platform.system() != "Windows":
+                return []
+            names = []
+            try:
+                cmd = [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+                ]
+                p = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                txt = (p.stdout or "") + "\n" + (p.stderr or "")
+                for line in txt.splitlines():
+                    name = line.strip()
+                    if name and name.lower() != "name":
+                        names.append(name)
+                if names:
+                    return names
+            except Exception:
+                pass
+            try:
+                p = subprocess.run(
+                    ["wmic", "path", "win32_VideoController", "get", "Name"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                txt = (p.stdout or "") + "\n" + (p.stderr or "")
+                for line in txt.splitlines():
+                    name = line.strip()
+                    if name and name.lower() != "name":
+                        names.append(name)
+            except Exception:
+                pass
+            return names
         is_linux = platform.system() == "Linux"
         torch_hip = None
         try:
@@ -262,6 +299,24 @@ def get_available_devices():
                 })
         except ImportError:
             pass
+        except Exception:
+            pass
+
+        # DirectML via ONNX Runtime (Windows) if torch_directml is not installed.
+        try:
+            if platform.system() == "Windows":
+                has_directml = any(d.get("type") == "directml" for d in devices)
+                if not has_directml and (_onnxruntime_has_dml() or _pkg_version("onnxruntime-directml")):
+                    names = _windows_gpu_names()
+                    count = len(names) if names else 1
+                    for i in range(count):
+                        dev_id = f"directml:{i}" if count > 1 else "directml"
+                        dev_name = names[i] if i < len(names) else f"DirectML GPU {i}"
+                        devices.append({
+                            "id": dev_id,
+                            "name": dev_name,
+                            "type": "directml"
+                        })
         except Exception:
             pass
             
@@ -664,6 +719,15 @@ def _pkg_version(dist_name: str):
         return None
 
 
+def _onnxruntime_has_dml() -> bool:
+    try:
+        import onnxruntime as ort
+        providers = ort.get_available_providers() or []
+        return "DmlExecutionProvider" in providers
+    except Exception:
+        return False
+
+
 def list_devices_machine():
     """Machine-readable dump for REAPER/Lua UIs (no JSON parser needed on Lua side)."""
     devices = get_available_devices()
@@ -691,7 +755,7 @@ def list_devices_machine():
         "cuda_available": False,
         "cuda_count": 0,
         "mps_available": False,
-        "directml_possible": importlib.util.find_spec("torch_directml") is not None,
+        "directml_possible": (importlib.util.find_spec("torch_directml") is not None) or _onnxruntime_has_dml(),
         "rocm_path_exists": False,
         "torch_hip": None,
         # ORT packages (audio-separator checks these)
