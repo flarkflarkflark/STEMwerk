@@ -3,8 +3,9 @@ function debugLog(msg) end
 function clearDebugLog() end
 -- @description Stemwerk: Main
 -- @author flarkAUDIO
--- @version 2.1.8
+-- @version 2.1.9
 -- @changelog
+--   2026-01-12: Help text pan/zoom across non-gallery tabs, smoother text pan + reset
 --   2026-01-12: Linux CUDA cuDNN path fix, selection rules clarified, help window positioning/persistence
 --   2026-01-12: Fixed importlib.util import for Linux/Arch compatibility, improved Python venv detection
 --   2025-12-26: Glossy UI buttons + text shadow, KITT LED FX tweaks, playhead stays put while playing.
@@ -5598,10 +5599,10 @@ local function drawArtGallery()
     -- UI() = fixed scale for UI elements that should NOT zoom (tabs, buttons, theme toggle, etc.)
     local function UI(val) return math.floor(val * baseScale + 0.5) end
 
-    -- Apply text zoom to scale for non-gallery/about tabs (content only)
-    -- Tab 5 (Gallery) and Tab 6 (About) use art zoom instead
+    -- Apply text zoom to scale for non-gallery tabs (content only)
+    -- Tab 5 (Gallery) uses art zoom instead
     local scale = baseScale
-    if helpState.currentTab ~= 5 and helpState.currentTab ~= 6 then
+    if helpState.currentTab ~= 5 then
         scale = baseScale * helpState.textZoom
     end
     -- PS() = zoomed scale for content that CAN zoom
@@ -5624,8 +5625,8 @@ local function drawArtGallery()
     if mouseWheel ~= artGalleryState.lastMouseWheel then
         local delta = (mouseWheel - artGalleryState.lastMouseWheel) / 120
 
-        if helpState.currentTab == 5 or helpState.currentTab == 6 then
-            -- Gallery/About tab: zoom art (fly-through effect with huge zoom range)
+        if helpState.currentTab == 5 then
+            -- Gallery tab: zoom art (fly-through effect with huge zoom range)
             local zoomFactor = 1.15
             if delta > 0 then
                 artGalleryState.targetZoom = math.min(50.0, artGalleryState.targetZoom * zoomFactor)  -- Much higher max for fly-through
@@ -5664,8 +5665,8 @@ local function drawArtGallery()
     -- Mouse handling depends on tab
     local rightMouseDown = gfx.mouse_cap & 2 == 2
 
-    if helpState.currentTab == 5 or helpState.currentTab == 6 then
-        -- === GALLERY/ABOUT TAB MOUSE CONTROLS ===
+    if helpState.currentTab == 5 then
+        -- === GALLERY TAB MOUSE CONTROLS ===
         -- Left-click drag = pan
         -- Right-click drag = rotate
         -- Single left-click (no drag) = new art
@@ -5725,32 +5726,23 @@ local function drawArtGallery()
         end
     else
         -- === NON-GALLERY TABS: text panning ===
-        -- Pan with right mouse button or middle mouse button
-        if (rightMouseDown or middleMouseDown) and not artGalleryState.isDragging then
-            artGalleryState.isDragging = true
-            artGalleryState.dragStartX = mx
-            artGalleryState.dragStartY = my
-            artGalleryState.dragStartPanX = artGalleryState.targetPanX
-            artGalleryState.dragStartPanY = artGalleryState.targetPanY
-        elseif (rightMouseDown or middleMouseDown) and artGalleryState.isDragging then
-            artGalleryState.targetPanX = artGalleryState.dragStartPanX + (mx - artGalleryState.dragStartX)
-            artGalleryState.targetPanY = artGalleryState.dragStartPanY + (my - artGalleryState.dragStartY)
-        elseif not rightMouseDown and not middleMouseDown then
-            artGalleryState.isDragging = false
-        end
-
-        -- Left-click text dragging
         local inContentArea = my > PS(50) and my < (h - PS(60))  -- Not in tabs or buttons
-        if mouseDown and inContentArea and not helpState.textDragging then
+        local panMouseDown = mouseDown or rightMouseDown or middleMouseDown
+        if panMouseDown and inContentArea and not helpState.textDragging then
             helpState.textDragging = true
             helpState.textDragStartX = mx
             helpState.textDragStartY = my
             helpState.textDragStartPanX = helpState.targetTextPanX
             helpState.textDragStartPanY = helpState.targetTextPanY
-        elseif mouseDown and helpState.textDragging then
-            helpState.targetTextPanX = helpState.textDragStartPanX + (mx - helpState.textDragStartX)
-            helpState.targetTextPanY = helpState.textDragStartPanY + (my - helpState.textDragStartY)
-        elseif not mouseDown then
+        elseif panMouseDown and helpState.textDragging then
+            local dx = mx - helpState.textDragStartX
+            local dy = my - helpState.textDragStartY
+            if math.abs(dx) > 5 or math.abs(dy) > 5 then
+                helpState.wasDrag = true
+            end
+            helpState.targetTextPanX = helpState.textDragStartPanX + dx
+            helpState.targetTextPanY = helpState.textDragStartPanY + dy
+        elseif not panMouseDown then
             helpState.textDragging = false
         end
     end
@@ -5765,19 +5757,37 @@ local function drawArtGallery()
 
     -- Smooth interpolation for text pan
     helpState.textPanX = helpState.textPanX + (helpState.targetTextPanX - helpState.textPanX) * smoothing
-    helpState.textPanY = helpState.textPanY + (helpState.targetTextPanY - helpState.targetTextPanY) * smoothing
+    helpState.textPanY = helpState.textPanY + (helpState.targetTextPanY - helpState.textPanY) * smoothing
 
-    -- Double-click to reset camera (including rotation) - only for Gallery/About tabs
+    local function resetTextView()
+        local defaultZoom = 1.0
+        if helpState.currentTab == 1 then
+            defaultZoom = 0.92
+        elseif helpState.currentTab == 2 then
+            defaultZoom = 0.90
+        elseif helpState.currentTab == 3 then
+            defaultZoom = 0.85
+        end
+        helpState.targetTextZoom = defaultZoom
+        helpState.targetTextPanX = 0
+        helpState.targetTextPanY = 0
+    end
+
+    -- Double-click to reset view
     -- Skip if this was a drag operation (wasDrag flag set when moved > 5 pixels)
     if mouseDown and not artGalleryState.wasMouseDown then
         local now = os.clock()
         if artGalleryState.lastClickTime and now - artGalleryState.lastClickTime < 0.3 then
-            -- Double click - reset camera and rotation ONLY if not dragging
-            if not helpState.wasDrag and (helpState.currentTab == 5 or helpState.currentTab == 6) then
-                artGalleryState.targetZoom = 1.0
-                artGalleryState.targetPanX = 0
-                artGalleryState.targetPanY = 0
-                helpState.targetRotation = 0
+            -- Double click - reset view ONLY if not dragging
+            if not helpState.wasDrag then
+                if helpState.currentTab == 5 then
+                    artGalleryState.targetZoom = 1.0
+                    artGalleryState.targetPanX = 0
+                    artGalleryState.targetPanY = 0
+                    helpState.targetRotation = 0
+                else
+                    resetTextView()
+                end
             end
         end
         artGalleryState.lastClickTime = now
@@ -6051,7 +6061,7 @@ local function drawArtGallery()
     -- Apply text pan offset for non-gallery tabs
     local textOffsetX = 0
     local textOffsetY = 0
-    if helpState.currentTab ~= 5 and helpState.currentTab ~= 6 then
+    if helpState.currentTab ~= 5 then
         textOffsetX = helpState.textPanX
         textOffsetY = helpState.textPanY
         -- Apply Y offset directly to content area for text tabs
@@ -7804,8 +7814,8 @@ local function drawArtGallery()
         -- Readability overlay removed (requested): avoid large rectangular "panel" look.
 
         -- Content
-        local centerX = w / 2
-        local contentY = tabAreaH + PS(30)
+        local centerX = w / 2 + textOffsetX
+        local contentY = tabAreaH + PS(30) + textOffsetY
 
         -- Title (big animated STEMwerk)
         do
@@ -7991,8 +8001,6 @@ local function drawArtGallery()
         if hintHover and controlsOpacity > 0.3 then
             if helpState.currentTab == 5 then
                 tooltipText = T("help_gallery_controls_tip")
-            elseif helpState.currentTab == 6 then
-                tooltipText = T("help_about_controls_tip")
             else
                 tooltipText = T("help_text_controls_tip")
             end
@@ -8018,21 +8026,6 @@ local function drawArtGallery()
         helpState.targetPanY = 0
     end
 
-    -- Helper to reset text zoom and pan (default zoom varies per tab so text fits immediately)
-    local function resetTextZoom()
-        local defaultZoom = 1.0
-        if helpState.currentTab == 1 then
-            defaultZoom = 0.92
-        elseif helpState.currentTab == 2 then
-            defaultZoom = 0.90
-        elseif helpState.currentTab == 3 then
-            defaultZoom = 0.85
-        end
-        helpState.targetTextZoom = defaultZoom
-        helpState.targetTextPanX = 0
-        helpState.targetTextPanY = 0
-    end
-
     -- Handle clicks
     if mouseDown and not helpState.wasMouseDown then
         -- Double-click detection
@@ -8043,16 +8036,16 @@ local function drawArtGallery()
         if clickedTab then
             helpState.currentTab = clickedTab
             resetCamera()
-            resetTextZoom()
+            resetTextView()
             -- Do NOT generate new art when switching tabs
         elseif closeHover and controlsOpacity > 0.3 then
             return "close"
         elseif isDoubleClick and not helpState.wasDrag then
             -- Double-click anywhere resets zoom/pan (only if not dragging)
-            if helpState.currentTab == 5 or helpState.currentTab == 6 then
+            if helpState.currentTab == 5 then
                 resetCamera()
             else
-                resetTextZoom()
+                resetTextView()
             end
         end
     end
@@ -8064,8 +8057,8 @@ local function drawArtGallery()
         return "close"
     elseif char == 13 then  -- Enter key = start STEMwerk
         return "start"
-    elseif helpState.currentTab == 5 or helpState.currentTab == 6 then
-        -- Art gallery / About tab navigation
+    elseif helpState.currentTab == 5 then
+        -- Art gallery tab navigation
         if char == 114 or char == 82 then  -- R key to reset camera
             resetCamera()
         elseif char == 32 then  -- Space for new art
@@ -8077,7 +8070,7 @@ local function drawArtGallery()
     if char >= 49 and char <= 54 then  -- 1-6 keys
         helpState.currentTab = char - 48
         resetCamera()
-        resetTextZoom()
+        resetTextView()
     end
 
     return nil
