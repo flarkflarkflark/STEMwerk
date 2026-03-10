@@ -1,4 +1,5 @@
 audio-separator[cpu]
+stemwerk-core
 onnxruntime
 soundfile
 pytest
