@@ -3,17 +3,15 @@ function debugLog(msg) end
 function clearDebugLog() end
 -- @description Stemwerk: Main
 -- @author flarkAUDIO
--- @version 2.2.3
+-- @version 2.2.0
 -- @changelog
---   2026-03-13: Release v2.2.3: The "Yeah Yeah" bossa release. Final UI polish.
---   2026-03-13: Fixed tooltip and footer synchronization with UI button states (In-place/Takes).
---   2026-03-13: Improved help screen legibility (Quick Start/Reaper tabs) with theme-aware overlays.
---   2026-03-13: Fixed tooltip crash and improved reporting for empty selections.
---   2026-03-13: Improved footer reporting (target detection, output counts, no-stems warning).
---   2026-03-13: Fixed misleading GPU status reporting in progress windows.
---   2026-03-13: Release v2.2.1: fix UI version string + refactor to STEMwerk-reaper
---   2026-03-13: Refactor to STEMwerk-reaper: uses stemwerk-core engine, REAPER-focused workflow
---   2026-01-12: Help text pan/zoom across non-gallery tabs, smoother text pan + reset
+--   2026-03-13: Release v2.2.0: Major UI Polish & Engine Refactor.
+--   2026-03-13: Comprehensive UI synchronization: footers and tooltips now accurately mirror button states (In-place/Takes).
+--   2026-03-13: Improved target reporting: footer now detects tracks via time selection across multiple tracks.
+--   2026-03-13: Fixed misleading GPU status reporting in progress windows; added active device info.
+--   2026-03-13: Improved help screen legibility (Quick Start/Reaper tabs) with theme-aware background panels.
+--   2026-03-13: Added pro-active footer warnings and informative popups for empty selections.
+--   2026-03-13: Refactor to STEMwerk-reaper: uses stemwerk-core engine, REAPER-focused workflow.
 --   2026-01-12: Linux CUDA cuDNN path fix, selection rules clarified, help window positioning/persistence
 --   2026-01-12: Fixed importlib.util import for Linux/Arch compatibility, improved Python venv detection
 --   2025-12-26: Glossy UI buttons + text shadow, KITT LED FX tweaks, playhead stays put while playing.
@@ -55,7 +53,7 @@ function clearDebugLog() end
 --   ## License
 --   MIT License - https://opensource.org/licenses/MIT
 
-local SCRIPT_NAME = "STEMwerk (v2.2.3)"
+local SCRIPT_NAME = "STEMwerk (v2.2.0)"
 local EXT_SECTION = "STEMwerk"  -- For ExtState persistence (keep old name for compatibility)
 -- STEMwerk.lua
 
@@ -9244,16 +9242,31 @@ local function drawTooltip()
             selectionText = string.format("%d %s, %d %s", selTrackCount, trackUnit, selItemCount, itemUnit)
         end
 
-        local takesText = (SETTINGS.createTakes or SETTINGS.outputMode == "keep-takes") and T("yes") or T("no")
+        local isTakesMode = not SETTINGS.createNewTracks
+        local takesText = isTakesMode and T("yes") or T("no")
         
         -- Build action list (Target)
         local actions = {}
         if SETTINGS.createNewTracks then
             table.insert(actions, T("new_tracks"))
             if SETTINGS.createFolder then table.insert(actions, "+ " .. T("create_folder")) end
-        elseif SETTINGS.outputMode == "in-place" or SETTINGS.outputMode == "keep-takes" or not SETTINGS.createNewTracks then
+        else
+            -- In-place mode
             table.insert(actions, T("in_place"))
+            
+            -- Add post-processing info
+            local ppMode = tostring(SETTINGS.postProcessTakes or "none")
+            if ppMode == "none" then
+                table.insert(actions, "(" .. T("keep_takes") .. ")")
+            elseif ppMode == "explode_new_tracks" then
+                table.insert(actions, "-> " .. T("new_tracks"))
+            elseif ppMode == "explode_in_place" then
+                table.insert(actions, "-> " .. T("explode_in_place"))
+            elseif ppMode == "explode_in_order" then
+                table.insert(actions, "-> " .. T("explode_in_order"))
+            end
         end
+        
         if SETTINGS.muteOriginal then table.insert(actions, "+ " .. T("mute_original")) end
         if SETTINGS.deleteOriginal then table.insert(actions, "+ " .. T("delete_original")) end
         if SETTINGS.deleteOriginalTrack then table.insert(actions, "+ " .. T("delete_track")) end
