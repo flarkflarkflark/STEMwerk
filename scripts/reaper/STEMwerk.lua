@@ -3,8 +3,9 @@ function debugLog(msg) end
 function clearDebugLog() end
 -- @description Stemwerk: Main
 -- @author flarkAUDIO
--- @version 2.2.0
+-- @version 2.2.1
 -- @changelog
+--   2026-03-13: Release v2.2.1: fix UI version string + refactor to STEMwerk-reaper
 --   2026-03-13: Refactor to STEMwerk-reaper: uses stemwerk-core engine, REAPER-focused workflow
 --   2026-01-12: Help text pan/zoom across non-gallery tabs, smoother text pan + reset
 --   2026-01-12: Linux CUDA cuDNN path fix, selection rules clarified, help window positioning/persistence
@@ -48,7 +49,7 @@ function clearDebugLog() end
 --   ## License
 --   MIT License - https://opensource.org/licenses/MIT
 
-local SCRIPT_NAME = "STEMwerk (v1.43 DEBUG)"
+local SCRIPT_NAME = "STEMwerk (v2.2.1)"
 local EXT_SECTION = "STEMwerk"  -- For ExtState persistence (keep old name for compatibility)
 -- STEMwerk.lua
 
