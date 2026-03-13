@@ -17435,7 +17435,10 @@ function drawMultiTrackProgressWindow()
 
     -- Line 1: Status overview
     local statusFmt = T("mt_status_line") or "Tracks: %d/%d | Audio: %.1fs/%.1fs | Stems: %d expected"
-    local statusText = string.format(statusFmt, completedJobs, numJobs, completedAudioDur, totalAudioDur, expectedStems)
+    
+    -- Show the duration of the current/last selection as the reference point, not the cumulative batch time
+    local displayTotalDur = numJobs > 0 and (multiTrackQueue.jobs[1].audioDuration or 0) or totalAudioDur
+    local statusText = string.format(statusFmt, completedJobs, numJobs, completedAudioDur / (totalAudioDur/displayTotalDur), displayTotalDur, expectedStems)
     gfx.x = barX
     gfx.y = infoY
     gfx.drawstr(statusText)
@@ -17524,10 +17527,11 @@ function drawMultiTrackProgressWindow()
         etaText = string.format(" | %s %d:%02d", tostring(etaLabel), etaMins, etaSecs)
     end
     
+    local modelDisplay = (SETTINGS.model == "htdemucs_ft") and "Quality" or (is6Stem and "6-Stem" or "Fast")
     local hintText = string.format("%s: %d:%02d%s | %s: %s%s | %s%s%s | %s", 
         mtTime, totalMins, totalSecs, etaText, 
         mtSeg, segSize, modeStr,
-        is6Stem and "6-Stem" or (isHighQuality and "Quality" or "Fast"),
+        modelDisplay,
         modeSuffix, activeDeviceStr, mtCancel)
 
     gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], statusBlockAlpha)
