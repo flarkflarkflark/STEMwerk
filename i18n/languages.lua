@@ -42,6 +42,12 @@ local LANGUAGES = {
         footer_location_new_folder = "New folder with stem tracks",
         footer_location_new_tracks = "New tracks below source",
         footer_location_in_place = "In-place (as %d takes on source tracks)",
+        footer_target_prefix = "Target:",
+        footer_via_time_selection = "(via time selection)",
+        footer_per_track_folders = "Per-track stem folders",
+        footer_output_calc = "%d stems (%d x %d tracks)",
+        footer_using_device = "Using: %s",
+        footer_device_none = "CPU (No GPU)",
 
         -- Stems
         vocals = "Vocals",
@@ -231,7 +237,7 @@ local LANGUAGES = {
 
         -- Messages
         no_stems_selected = "No Stems Selected",
-        please_select_stem = "Please select at least one stem.",
+        please_select_stem = "Please click on one or more stem buttons (Vocals, Drums, Bass, Other) in the center column before starting.",
         separation_cancelled = "Separation cancelled.",
         separation_timeout = "Separation timed out after 10 minutes.",
 

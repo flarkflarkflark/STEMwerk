@@ -3,8 +3,11 @@ function debugLog(msg) end
 function clearDebugLog() end
 -- @description Stemwerk: Main
 -- @author flarkAUDIO
--- @version 2.2.1
+-- @version 2.2.2
 -- @changelog
+--   2026-03-13: Release v2.2.2: The "Yeah Yeah" bossa release.
+--   2026-03-13: Improved footer reporting (target detection, output counts, no-stems warning).
+--   2026-03-13: Fixed misleading GPU status reporting in progress windows.
 --   2026-03-13: Release v2.2.1: fix UI version string + refactor to STEMwerk-reaper
 --   2026-03-13: Refactor to STEMwerk-reaper: uses stemwerk-core engine, REAPER-focused workflow
 --   2026-01-12: Help text pan/zoom across non-gallery tabs, smoother text pan + reset
@@ -49,7 +52,7 @@ function clearDebugLog() end
 --   ## License
 --   MIT License - https://opensource.org/licenses/MIT
 
-local SCRIPT_NAME = "STEMwerk (v2.2.1)"
+local SCRIPT_NAME = "STEMwerk (v2.2.2)"
 local EXT_SECTION = "STEMwerk"  -- For ExtState persistence (keep old name for compatibility)
 -- STEMwerk.lua
 
@@ -11936,51 +11939,91 @@ local function dialogLoop()
     end
 
     -- Compose status lines (translated)
-    local trackUnit = trSingularPlural(selTrackCount, "footer_track", "footer_tracks")
+    -- 1. Selection line (Targeting)
+    local effectiveTargets = 0
+    local viaTimeSelection = false
+    local start_time, end_time = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+    
+    if start_time ~= end_time and (selTrackCount == 0 and selItemCount == 0) then
+        viaTimeSelection = true
+        for i = 0, reaper.CountTracks(0) - 1 do
+            local track = reaper.GetTrack(0, i)
+            local itemCount = reaper.CountTrackMediaItems(track)
+            local hasItemInSelection = false
+            for j = 0, itemCount - 1 do
+                local item = reaper.GetTrackMediaItem(track, j)
+                local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+                local length = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+                if pos < end_time and pos + length > start_time then
+                    hasItemInSelection = true
+                    break
+                end
+            end
+            if hasItemInSelection then effectiveTargets = effectiveTargets + 1 end
+        end
+    else
+        effectiveTargets = selTrackCount > 0 and selTrackCount or (selItemCount > 0 and 1 or 0)
+    end
+
+    local trackUnit = trSingularPlural(effectiveTargets, "footer_track", "footer_tracks")
     local itemUnit = trSingularPlural(selItemCount, "footer_item", "footer_items")
     local selLine
-    if timeSelText then
-        selLine = string.format("%s %d %s, %d %s, %s %s", T("selected"), selTrackCount, trackUnit, selItemCount, itemUnit, timeSelText, T("footer_time_selection"))
+    local targetPrefix = T("footer_target_prefix") or "Target:"
+    
+    if viaTimeSelection then
+        selLine = string.format("%s %d %s %s, %s %s", targetPrefix, effectiveTargets, trackUnit, T("footer_via_time_selection") or "(via time selection)", timeSelText, T("footer_time_selection"))
     else
         selLine = string.format("%s %d %s, %d %s", T("selected"), selTrackCount, trackUnit, selItemCount, itemUnit)
-    end
-
-    local outTrackUnit = trSingularPlural(outTrackCount, "footer_track", "footer_tracks")
-    local outItemUnit = trSingularPlural(outItemCount, "footer_item", "footer_items")
-    local outLine
-    local srcTrackUnit = trSingularPlural(effectiveSrcTracks, "footer_track", "footer_tracks")
-    local srcItemUnit = trSingularPlural(effectiveSrcItems, "footer_item", "footer_items")
-
-    if SETTINGS.createNewTracks then
-        -- Output: 16 stem tracks from 4 source tracks
-        outLine = string.format("%s %d %s %s %d %s %s", 
-            T("output"), outTrackCount, T("footer_stem_tracks"), 
-            T("footer_from"), effectiveSrcTracks, T("footer_source"), srcTrackUnit)
-    else
-        -- Output: 4 takes in 1 source item
-        local takeUnit = trSingularPlural(outItemCount, "footer_take", "footer_takes")
-        outLine = string.format("%s %d %s (in %d %s %s)", 
-            T("output"), outItemCount, takeUnit, 
-            effectiveSrcItems, T("footer_source"), srcItemUnit)
-    end
-
-    -- Build stem names list
-    local selectedNames = {}
-    for _, stem in ipairs(STEMS) do
-        if stem.selected and (not stem.sixStemOnly or is6Stem) then
-            table.insert(selectedNames, T(stem.name:lower()))
+        if timeSelText then
+            selLine = selLine .. string.format(", %s %s", timeSelText, T("footer_time_selection"))
         end
     end
-    local namesStr = table.concat(selectedNames, ", ")
 
-    local locText
-    if SETTINGS.createNewTracks then
-        local baseLoc = SETTINGS.createFolder and T("footer_location_new_folder") or T("footer_location_new_tracks")
-        locText = string.format("%s (%d: %s)", baseLoc, selectedStemCount, namesStr)
-    else
-        locText = string.format(T("footer_location_in_place"), selectedStemCount) .. " (" .. namesStr .. ")"
+    -- 2. Output line
+    local stemsPerTrack = 0
+    for _, stem in ipairs(STEMS) do
+        if stem.selected and (not stem.sixStemOnly or is6Stem) then stemsPerTrack = stemsPerTrack + 1 end
     end
-    local locLine = T("target") .. " " .. locText
+    
+    local totalOutputTracks = effectiveTargets * stemsPerTrack
+    local outLine
+    local locLine
+    local locationPrefix = T("target") or "Location:"
+
+    if stemsPerTrack == 0 then
+        -- Pro-active warning in footer
+        outLine = "[!] " .. (T("no_stems_selected") or "No Stems Selected")
+        locLine = T("please_select_stem") or "Please select stems in the center column."
+    else
+        -- Normal output calculation
+        if SETTINGS.createNewTracks then
+            outLine = string.format("%s %s", T("output"), 
+                string.format(T("footer_output_calc") or "%d stems (%d x %d tracks)", totalOutputTracks, stemsPerTrack, effectiveTargets))
+        else
+            local outItemCount = selItemCount > 0 and (selItemCount * stemsPerTrack) or stemsPerTrack
+            local takeUnit = trSingularPlural(outItemCount, "footer_take", "footer_takes")
+            outLine = string.format("%s %d %s (in %d %s)", T("output"), outItemCount, takeUnit, effectiveTargets, trackUnit)
+        end
+
+        -- 3. Location line
+        local selectedNames = {}
+        for _, stem in ipairs(STEMS) do
+            if stem.selected and (not stem.sixStemOnly or is6Stem) then
+                table.insert(selectedNames, T(stem.name:lower()))
+            end
+        end
+        local namesStr = table.concat(selectedNames, ", ")
+
+        if SETTINGS.createNewTracks then
+            local baseLoc = effectiveTargets > 1 and (T("footer_per_track_folders") or "Per-track stem folders") or T("footer_location_new_folder")
+            locLine = string.format("%s %s (%d: %s)", locationPrefix, baseLoc, stemsPerTrack, namesStr)
+        elseif SETTINGS.outputMode == "in-place" then
+            locLine = string.format("%s %s", locationPrefix, string.format(T("footer_location_in_place"), stemsPerTrack))
+        else
+            locLine = string.format("%s %s", locationPrefix, T("footer_location_new_tracks"))
+        end
+    end
+
 
     -- Draw 3 separate translucent blocks (theme-aware)
     local function drawStatusBlock(blockY, text)
@@ -14005,11 +14048,18 @@ local function drawProgressWindow()
         local etaLabel = T("eta_label") or "ETA:"
         hintText = tostring(etaLabel) .. " " .. tostring(bottomEta) .. " | " .. tostring(hintText)
     end
-    local statusFontSize = PS(9)
+    -- Add active device info
+    local activeDeviceStr = ""
+    local activeDevice = SETTINGS.device or "auto"
+    if activeDevice ~= "auto" then
+        activeDeviceStr = (T("footer_using_device") or "Using: %s"):format(tostring(activeDevice)) .. " | "
+    end
+    hintText = activeDeviceStr .. hintText
+    local statusFontSize = PS(10)
     local statusPadX = PS(10)
-    local statusBlockPadY = PS(2)
-    local statusBlockAlpha = 0.7
-    local statusBlockBorderAlpha = 0.75
+    local statusBlockPadY = PS(10)
+    local statusBlockAlpha = 0.8
+    local statusBlockBorderAlpha = 0.85
     gfx.setfont(1, "Arial", statusFontSize)
     local statusLineH = gfx.texth
     local statusBlockH = statusLineH + statusBlockPadY * 2
@@ -17318,23 +17368,35 @@ function drawMultiTrackProgressWindow()
     -- (Terminal rendering moved into the shared display area above, so it works in both Seq and Par)
 
     -- Bottom line: Total elapsed, model, segment and cancel hint
-    local totalMins = math.floor(globalElapsed / 60)
-    local totalSecs = globalElapsed % 60
-    local statusFontSize = PS(9)
+    local statusFontSize = PS(10)
     local statusPadX = PS(10)
-    local statusBlockPadY = PS(2)
-    local statusBlockAlpha = 0.7
-    local statusBlockBorderAlpha = 0.75
+    local statusBlockPadY = PS(10)
+    local statusBlockAlpha = 0.8
+    local statusBlockBorderAlpha = 0.85
     gfx.setfont(1, "Arial", statusFontSize)
     local statusLineH = gfx.texth
     local statusBlockH = statusLineH + statusBlockPadY * 2
     local statusBlockY = h - statusBlockH
     local segSize = multiTrackQueue.sequentialMode and "40" or "25"
     local modeStr = multiTrackQueue.sequentialMode and "Seq" or "Par"
+    
+    -- Fix misleading GPU reporting
     local modeSuffix = ""
-    if multiTrackQueue.forceSequentialReason and multiTrackQueue.forceSequentialReason ~= "" then
-        modeSuffix = " (forced: " .. tostring(multiTrackQueue.forceSequentialReason) .. ")"
+    local reason = multiTrackQueue.forceSequentialReason or ""
+    if reason ~= "" and not reason:match("No GPU") and not reason:match("no GPU") then
+        modeSuffix = " (forced: " .. tostring(reason) .. ")"
     end
+
+    -- Add active device info
+    local activeDeviceStr = ""
+    if multiTrackQueue.currentJobDevice then
+        activeDeviceStr = " | " .. (T("footer_using_device") or "Using: %s"):format(tostring(multiTrackQueue.currentJobDevice))
+    elseif SETTINGS.device and SETTINGS.device ~= "auto" then
+        activeDeviceStr = " | " .. (T("footer_using_device") or "Using: %s"):format(tostring(SETTINGS.device))
+    end
+    
+    local totalMins = math.floor(globalElapsed / 60)
+    local totalSecs = math.floor(globalElapsed % 60)
     local mtTime = T("mt_time") or "Time"
     local mtSeg = T("mt_seg") or "Seg"
     local mtCancel = T("mt_cancel") or "ESC=cancel"
@@ -17345,18 +17407,24 @@ function drawMultiTrackProgressWindow()
         local etaLabel = T("eta_label") or "ETA:"
         etaText = string.format(" | %s %d:%02d", tostring(etaLabel), etaMins, etaSecs)
     end
-    local statusText = string.format("%s: %d:%02d%s | %s | %s:%s | %s%s | %s",
-        tostring(mtTime), totalMins, totalSecs, etaText, SETTINGS.model or "?", tostring(mtSeg), segSize, modeStr, modeSuffix, tostring(mtCancel))
+    
+    local hintText = string.format("%s: %d:%02d%s | %s: %s%s | %s%s%s | %s", 
+        mtTime, totalMins, totalSecs, etaText, 
+        mtSeg, segSize, modeStr,
+        is6Stem and "6-Stem" or (isHighQuality and "Quality" or "Fast"),
+        modeSuffix, activeDeviceStr, mtCancel)
+
     gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], statusBlockAlpha)
     gfx.rect(0, statusBlockY, gfx.w, statusBlockH, 1)
     gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], statusBlockBorderAlpha)
     gfx.rect(0, statusBlockY, gfx.w, statusBlockH, 0)
     gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
     local availableW = gfx.w - statusPadX * 2
-    local labelText, tw = fitTextToBox(statusText, availableW, statusFontSize, statusFontSize)
+    local labelText, tw = fitTextToBox(hintText, availableW, statusFontSize, statusFontSize)
     gfx.x = statusPadX + (availableW - tw) / 2
     gfx.y = statusBlockY + statusBlockPadY
     gfx.drawstr(labelText)
+
 
     -- flarkAUDIO logo at top (translucent) - "flark" regular, "AUDIO" bold
     gfx.setfont(1, "Arial", PS(10))
