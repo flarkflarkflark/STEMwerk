@@ -931,7 +931,6 @@ local APP_VERSION = "2.1.8"
 -- Forward declarations (these are defined later in the file, but used by early helpers)
 local SETTINGS
 local saveSettings
-local persistWindowPos
 local drawGlossyPill
 local drawGlossyRect
 
@@ -2410,9 +2409,11 @@ end
 
 -- Save settings to ExtState
 saveSettings = function()
-    -- Do NOT recapture geometry here. On OS-close (window manager X), the gfx
-    -- window may already be invalid and return bogus 0,0 or outer-window sizes.
-    -- Persist only the last known-good geometry that was captured while alive.
+    -- IMPORTANT:
+    -- Do NOT try to recapture window geometry here.
+    -- When the user closes via the OS window-manager "X", the gfx window may
+    -- already be gone and a late capture can overwrite a good cached position.
+    -- We only persist the last known-good geometry that was tracked live.
 
     reaper.SetExtState(EXT_SECTION, "model", SETTINGS.model, true)
     reaper.SetExtState(EXT_SECTION, "createNewTracks", SETTINGS.createNewTracks and "1" or "0", true)
@@ -2436,7 +2437,18 @@ saveSettings = function()
         reaper.SetExtState(EXT_SECTION, "stem_" .. stem.name, stem.selected and "1" or "0", true)
     end
 
-    persistWindowPos()
+    -- Save window size and position in standard "window_pos" format (x,y,w,h)
+    -- Use the cached last known-good geometry only; do not read directly from gfx here.
+    if lastDialogX and lastDialogY and lastDialogW and lastDialogH then
+        local posStr = string.format("%d,%d,%d,%d", math.floor(lastDialogX), math.floor(lastDialogY), math.floor(lastDialogW), math.floor(lastDialogH))
+        reaper.SetExtState(EXT_SECTION, "window_pos", posStr, true)
+        
+        -- Cleanup old individual keys
+        reaper.DeleteExtState(EXT_SECTION, "windowX", true)
+        reaper.DeleteExtState(EXT_SECTION, "windowY", true)
+        reaper.DeleteExtState(EXT_SECTION, "windowWidth", true)
+        reaper.DeleteExtState(EXT_SECTION, "windowHeight", true)
+    end
 end
 
 -- Register exit function (now that saveSettings is defined)
@@ -8087,10 +8099,7 @@ end
 local showStemSelectionDialog
 local captureWindowGeometry
 
--- Update lastDialogX/Y/W/H from the current gfx window using a consistent
--- geometry model. The key rule is: store the same kind of size that gfx.init()
--- expects on reopen. Using JS_Window_GetRect() width/height (outer frame size)
--- mixed with gfx.w/gfx.h (client/framebuffer size) causes "window creep".
+-- Update lastDialogX/Y/W/H from a given gfx window title (best-effort)
 local function estimateTitlebarHeight()
     if OS == "Windows" then return 30 end
     if OS == "macOS" then return 24 end
@@ -8098,17 +8107,24 @@ local function estimateTitlebarHeight()
 end
 
 local function isGfxWindowVisible()
-    if not (gfx and gfx.getchar) then return true end
-    local ok, flags = pcall(gfx.getchar, 65537)
-    if not ok or type(flags) ~= "number" then return true end
-    if flags < 0 then return false end
-    -- Only trust the visibility bit when present.
-    if flags > 255 and (flags & 4) ~= 4 then return false end
-    return true
+    if not gfx or not gfx.getchar then return false end
+    local flags = gfx.getchar(65537)
+    if not flags or flags < 0 then return false end
+    return (flags & 4) == 4
 end
 
-local function rememberDialogGeometry(x, y, w, h)
-    x, y, w, h = tonumber(x), tonumber(y), tonumber(w), tonumber(h)
+local function persistLastDialogGeometry()
+    if EXT_SECTION and lastDialogX and lastDialogY and lastDialogW and lastDialogH then
+        local posStr = string.format("%d,%d,%d,%d", math.floor(lastDialogX), math.floor(lastDialogY), math.floor(lastDialogW), math.floor(lastDialogH))
+        reaper.SetExtState(EXT_SECTION, "window_pos", posStr, true)
+    end
+end
+
+local function setLastDialogGeometry(x, y, w, h)
+    x = tonumber(x)
+    y = tonumber(y)
+    w = tonumber(w)
+    h = tonumber(h)
     if not x or not y or not w or not h then return false end
     if w <= 0 or h <= 0 then return false end
 
@@ -8117,10 +8133,13 @@ local function rememberDialogGeometry(x, y, w, h)
     w = math.floor(w)
     h = math.floor(h)
 
-    -- Ignore the classic late-close bogus reset to 0,0 if we already had a
-    -- more plausible previous position.
-    if x == 0 and y == 0 and lastDialogX and lastDialogY and (lastDialogX ~= 0 or lastDialogY ~= 0) then
-        return false
+    -- Guard against the known bogus late-close sample where the window has already
+    -- disappeared and geometry collapses to 0,0. We keep the previous good value.
+    if x == 0 and y == 0 and lastDialogX and lastDialogY then
+        local prevX, prevY = math.floor(lastDialogX or 0), math.floor(lastDialogY or 0)
+        if prevX ~= 0 or prevY ~= 0 then
+            return false
+        end
     end
 
     lastDialogX = x
@@ -8130,41 +8149,17 @@ local function rememberDialogGeometry(x, y, w, h)
     return true
 end
 
-local function rememberDialogGeometryFromRect(left, top, right, bottom)
-    -- Keep X/Y from the native window rect, but prefer gfx.w/gfx.h for W/H so
-    -- we store the same client/framebuffer size that gfx.init() expects.
-    local w = (gfx and gfx.w and gfx.w > 0) and gfx.w or ((lastDialogW and lastDialogW > 0) and lastDialogW or ((right and left) and (right - left) or nil))
-    local h = (gfx and gfx.h and gfx.h > 0) and gfx.h or ((lastDialogH and lastDialogH > 0) and lastDialogH or ((bottom and top) and (bottom - top) or nil))
-    return rememberDialogGeometry(left, top, w, h)
-end
-
-persistWindowPos = function()
-    local saveW = (lastDialogW and lastDialogW > 0) and lastDialogW or ((gfx and gfx.w and gfx.w > 0) and gfx.w or nil)
-    local saveH = (lastDialogH and lastDialogH > 0) and lastDialogH or ((gfx and gfx.h and gfx.h > 0) and gfx.h or nil)
-    if lastDialogX and lastDialogY and saveW and saveH then
-        local posStr = string.format("%d,%d,%d,%d", math.floor(lastDialogX), math.floor(lastDialogY), math.floor(saveW), math.floor(saveH))
-        reaper.SetExtState(EXT_SECTION, "window_pos", posStr, true)
-
-        -- Cleanup old individual keys
-        reaper.DeleteExtState(EXT_SECTION, "windowX", true)
-        reaper.DeleteExtState(EXT_SECTION, "windowY", true)
-        reaper.DeleteExtState(EXT_SECTION, "windowWidth", true)
-        reaper.DeleteExtState(EXT_SECTION, "windowHeight", true)
-    end
-end
-
 local function updateDialogPosFromGfx()
     if not (gfx and gfx.w and gfx.h and gfx.w > 0 and gfx.h > 0) then return false end
     if not isGfxWindowVisible() then return false end
 
-    -- Best source inside REAPER: ask gfx itself for the undocked window rect.
+    -- Prefer gfx.dock query: it returns the undocked window position/size without
+    -- depending on a window title lookup.
     if gfx.dock then
         local dockState, wx, wy, ww, wh = gfx.dock(-1, 0, 0, 0, 0)
-        if dockState and wx and wy and ww and wh and ww > 0 and wh > 0 then
-            if rememberDialogGeometry(wx, wy, ww, wh) then
-                persistWindowPos()
-                return true
-            end
+        if setLastDialogGeometry(wx, wy, ww, wh) then
+            persistLastDialogGeometry()
+            return true
         end
     end
 
@@ -8178,8 +8173,8 @@ local function updateDialogPosFromGfx()
             local px, py = pt[1], pt[2]
             local sx, sy = gfx.clienttoscreen(px, py)
             if sx and sy and not (sx == 0 and sy == 0) then
-                if rememberDialogGeometry(sx - px, math.max(0, (sy - py) - estimateTitlebarHeight()), gfx.w, gfx.h) then
-                    persistWindowPos()
+                if setLastDialogGeometry(sx - px, math.max(0, (sy - py) - estimateTitlebarHeight()), gfx.w, gfx.h) then
+                    persistLastDialogGeometry()
                     return true
                 end
             end
@@ -8190,25 +8185,28 @@ local function updateDialogPosFromGfx()
     if mx and my and mx >= 0 and my >= 0 and mx <= gfx.w and my <= gfx.h then
         local sx, sy = reaper.GetMousePosition()
         if sx and sy then
-            return rememberDialogGeometry(sx - mx, math.max(0, (sy - my) - estimateTitlebarHeight()), gfx.w, gfx.h)
+            if setLastDialogGeometry(sx - mx, math.max(0, (sy - my) - estimateTitlebarHeight()), gfx.w, gfx.h) then
+                persistLastDialogGeometry()
+                return true
+            end
         end
     end
     return false
 end
 
 captureWindowGeometry = function(title)
-    if updateDialogPosFromGfx() then return true end
-
     if title and reaper and reaper.JS_Window_Find and reaper.JS_Window_GetRect then
         local hwnd = reaper.JS_Window_Find(title, true)
         if hwnd then
             local ok, left, top, right, bottom = reaper.JS_Window_GetRect(hwnd)
-            if ok then
-                return rememberDialogGeometryFromRect(left, top, right, bottom)
+            if ok and setLastDialogGeometry(left, top, right - left, bottom - top) then
+                return true
             end
         end
     end
 
+    -- Fallback: capture size and position from gfx if available
+    if updateDialogPosFromGfx() then return true end
     return false
 end
 
@@ -8238,7 +8236,10 @@ local function artGalleryLoop()
             helpState.hwnd = hwnd
             local ok, left, top, right, bottom = reaper.JS_Window_GetRect(hwnd)
             if ok then
-                rememberDialogGeometryFromRect(left, top, right, bottom)
+                lastDialogX = left
+                lastDialogY = top
+                lastDialogW = right - left
+                lastDialogH = bottom - top
             end
             -- Update window title dynamically
             if reaper.JS_Window_SetTitle then
@@ -8254,7 +8255,10 @@ local function artGalleryLoop()
         if helpState.hwnd and reaper.JS_Window_GetRect then
             local ok, left, top, right, bottom = reaper.JS_Window_GetRect(helpState.hwnd)
             if ok then
-                rememberDialogGeometryFromRect(left, top, right, bottom)
+                lastDialogX = left
+                lastDialogY = top
+                lastDialogW = right - left
+                lastDialogH = bottom - top
                 captured = true
             end
         end
@@ -8288,7 +8292,10 @@ local function artGalleryLoop()
         if helpState.hwnd and reaper.JS_Window_GetRect then
             local ok, left, top, right, bottom = reaper.JS_Window_GetRect(helpState.hwnd)
             if ok then
-                rememberDialogGeometryFromRect(left, top, right, bottom)
+                lastDialogX = left
+                lastDialogY = top
+                lastDialogW = right - left
+                lastDialogH = bottom - top
                 captured = true
             end
         end
@@ -8906,7 +8913,10 @@ local function messageWindowLoop()
         if hwnd then
             local retval, left, top, right, bottom = reaper.JS_Window_GetRect(hwnd)
             if retval then
-                rememberDialogGeometryFromRect(left, top, right, bottom)
+                lastDialogX = left
+                lastDialogY = top
+                lastDialogW = right - left
+                lastDialogH = bottom - top
             end
         end
     end
@@ -11057,7 +11067,10 @@ local function dialogLoop()
         if hwnd then
             local retval, left, top, right, bottom = reaper.JS_Window_GetRect(hwnd)
             if retval then
-                rememberDialogGeometryFromRect(left, top, right, bottom)
+                lastDialogX = left
+                lastDialogY = top
+                lastDialogW = right - left
+                lastDialogH = bottom - top
                 updatedPos = true
             end
         end
@@ -15380,17 +15393,12 @@ function createStemTracksForSelection(stemPaths, selPos, selLen, sourceTrack)
         for _, stem in ipairs(STEMS) do if stem.selected and stemPaths[stem.name:lower()] then selectedCount = selectedCount + 1 end end
 
         local folderTrack = nil
-        local sourceTrackName = "Selection"
-        if refTrack then 
-            local _, tn = reaper.GetTrackName(refTrack) 
-            if tn and tn ~= "" then sourceTrackName = tn end 
-        end
-        local sourceItemName = sourceTrackName -- Fallback for items when using selection
-
+        local sourceName = "Selection"
+        if refTrack then local _, tn = reaper.GetTrackName(refTrack) if tn and tn ~= "" then sourceName = tn end end
         if SETTINGS.createFolder then
             reaper.InsertTrackAtIndex(trackIdx, true)
             folderTrack = reaper.GetTrack(0, trackIdx)
-            reaper.GetSetMediaTrackInfo_String(folderTrack, "P_NAME", sourceTrackName .. " - Stems", true)
+            reaper.GetSetMediaTrackInfo_String(folderTrack, "P_NAME", sourceName .. " - Stems", true)
             reaper.SetMediaTrackInfo_Value(folderTrack, "I_FOLDERDEPTH", 1)
             reaper.SetMediaTrackInfo_Value(folderTrack, "I_CUSTOMCOLOR", rgbToReaperColor(180, 140, 200))
             ensureTrackHeight(folderTrack)
@@ -15405,7 +15413,7 @@ function createStemTracksForSelection(stemPaths, selPos, selLen, sourceTrack)
                     reaper.InsertTrackAtIndex(trackIdx + importedCount, true)
                     local newTrack = reaper.GetTrack(0, trackIdx + importedCount)
                     ensureTrackHeight(newTrack)
-                    local newTrackName = selectedCount == 1 and (stem.name .. " - " .. sourceTrackName) or (sourceTrackName .. " - " .. stem.name)
+                    local newTrackName = selectedCount == 1 and (stem.name .. " - " .. sourceName) or (sourceName .. " - " .. stem.name)
                     reaper.GetSetMediaTrackInfo_String(newTrack, "P_NAME", newTrackName, true)
                     local color = rgbToReaperColor(stem.color[1], stem.color[2], stem.color[3])
                     reaper.SetMediaTrackInfo_Value(newTrack, "I_CUSTOMCOLOR", color)
@@ -15414,7 +15422,7 @@ function createStemTracksForSelection(stemPaths, selPos, selLen, sourceTrack)
                     reaper.SetMediaItemInfo_Value(newItem, "D_LENGTH", selLen)
                     local newTake = reaper.AddTakeToMediaItem(newItem)
                     reaper.SetMediaItemTake_Source(newTake, reaper.PCM_Source_CreateFromFile(stemPath))
-                    local newTakeName = sourceItemName .. " - " .. stem.name
+                    local newTakeName = sourceName .. " - " .. stem.name
                 reaper.GetSetMediaItemTakeInfo_String(newTake, "P_NAME", newTakeName, true)
                     reaper.SetMediaItemInfo_Value(newItem, "I_CUSTOMCOLOR", color)
                     importedCount = importedCount + 1
@@ -15891,7 +15899,10 @@ function resultWindowLoop()
         if hwnd then
             local retval, left, top, right, bottom = reaper.JS_Window_GetRect(hwnd)
             if retval then
-                rememberDialogGeometryFromRect(left, top, right, bottom)
+                lastDialogX = left
+                lastDialogY = top
+                lastDialogW = right - left
+                lastDialogH = bottom - top
             end
 
             -- NOTE: Focus check removed - was causing double execution on multi-track processing

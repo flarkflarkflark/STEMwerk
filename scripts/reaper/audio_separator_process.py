@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 import platform
+import shutil
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -319,8 +320,43 @@ def main():
         sep.on_progress = reaper_progress
 
         result = sep.separate(args.input, args.output_dir, stems=stems or None)
-        output_files = {name: str(path) for name, path in result.stems.items()}
-        print(json.dumps(output_files))
+        
+        # Mapping logica voor REAPER compatibiliteit
+        stem_mapping = {
+            'vocals': ['vocals', 'vocal', 'Vocals'],
+            'drums':  ['drums', 'drum', 'Drums'],
+            'bass': ['bass', 'Bass'],
+            'other': ['other', 'Other', 'no_vocals', 'instrumental', 'Instrumental'],
+            'guitar': ['guitar', 'Guitar'],
+            'piano': ['piano', 'Piano', 'keys', 'Keys']
+        }
+
+        reaper_stems = {}
+        for stem_name, stem_path in result.stems.items():
+            # Zorg voor absoluut pad
+            abs_path = Path(stem_path).absolute()
+            
+            # Zoek naar de juiste REAPER naam
+            filename = abs_path.stem.lower()
+            target_name = stem_name  # fallback
+            
+            for map_name, patterns in stem_mapping.items():
+                if any(p.lower() in filename for p in patterns):
+                    target_name = map_name
+                    break
+            
+            # Hernoem bestand naar simpele naam (bijv. vocals.wav)
+            new_path = abs_path.parent / f"{target_name}.wav"
+            if abs_path != new_path:
+                if new_path.exists():
+                    os.remove(new_path)
+                shutil.move(str(abs_path), str(new_path))
+            
+            reaper_stems[target_name] = str(new_path)
+            print(f"  {target_name}:  {new_path}", file=sys.stderr)
+
+        # Print de JSON die Lua verwacht
+        print(json.dumps(reaper_stems))
 
         if write_done:
             write_done("DONE")
