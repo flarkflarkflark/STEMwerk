@@ -3,9 +3,12 @@ function debugLog(msg) end
 function clearDebugLog() end
 -- @description Stemwerk: Main
 -- @author flarkAUDIO
--- @version 2.2.2
+-- @version 2.2.3
 -- @changelog
---   2026-03-13: Release v2.2.2: The "Yeah Yeah" bossa release.
+--   2026-03-13: Release v2.2.3: The "Yeah Yeah" bossa release. Final UI polish.
+--   2026-03-13: Fixed tooltip and footer synchronization with UI button states (In-place/Takes).
+--   2026-03-13: Improved help screen legibility (Quick Start/Reaper tabs) with theme-aware overlays.
+--   2026-03-13: Fixed tooltip crash and improved reporting for empty selections.
 --   2026-03-13: Improved footer reporting (target detection, output counts, no-stems warning).
 --   2026-03-13: Fixed misleading GPU status reporting in progress windows.
 --   2026-03-13: Release v2.2.1: fix UI version string + refactor to STEMwerk-reaper
@@ -52,7 +55,7 @@ function clearDebugLog() end
 --   ## License
 --   MIT License - https://opensource.org/licenses/MIT
 
-local SCRIPT_NAME = "STEMwerk (v2.2.2)"
+local SCRIPT_NAME = "STEMwerk (v2.2.3)"
 local EXT_SECTION = "STEMwerk"  -- For ExtState persistence (keep old name for compatibility)
 -- STEMwerk.lua
 
@@ -7259,6 +7262,21 @@ local function drawArtGallery()
         gfx.y = contentY + PS(50)
         gfx.drawstr(subText)
 
+        -- Add a legibility background panel for the steps area
+        local panelX = PS(30) + textOffsetX
+        local panelY = contentY + PS(70) + textOffsetY
+        local panelW = w - PS(60)
+        local panelH = h - panelY - UI(60)
+        
+        if isDarkMode then
+            gfx.set(0, 0, 0, 0.6) -- Dark overlay
+        else
+            gfx.set(1, 1, 1, 0.75) -- Light overlay
+        end
+        gfx.rect(panelX, panelY, panelW, panelH, 1)
+        gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 0.25)
+        gfx.rect(panelX, panelY, panelW, panelH, 0)
+
         -- Steps - LARGER with more detail (all translated)
         local steps = {
             {num = "1", title = T("help_step1_title"), desc = T("help_step1_desc"),
@@ -7268,72 +7286,60 @@ local function drawArtGallery()
             {num = "3", title = T("help_step3_title"), desc = T("help_step3_desc"),
              detail = T("help_step3_detail")},
         }
-        local stepY = contentY + PS(85)
-        local stepSpacing = PS(75)
+        local stepY = panelY + PS(20)
+        local stepSpacing = (panelH - PS(40)) / 3
 
         for i, step in ipairs(steps) do
-            -- Step number circle - LARGER
-            local circleX = PS(60) + textOffsetX
-            local circleR = PS(25)
+            -- Step number circle
+            local circleX = panelX + PS(40)
+            local circleR = PS(22)
+            local circleY = stepY + PS(18)
 
             -- Glow effect behind circle
-            for r = circleR + PS(8), circleR, -PS(2) do
-                gfx.set(stemColors[i][1], stemColors[i][2], stemColors[i][3], 0.1)
-                gfx.circle(circleX, stepY + PS(18), r, 1, 1)
+            for r = circleR + PS(6), circleR, -PS(2) do
+                gfx.set(stemColors[i][1], stemColors[i][2], stemColors[i][3], 0.15 + audioPeak * 0.2)
+                gfx.circle(circleX, circleY, r, 1, 1)
             end
 
             gfx.set(stemColors[i][1], stemColors[i][2], stemColors[i][3], 1)
-            gfx.circle(circleX, stepY + PS(18), circleR, 1, 1)
-            gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
-            gfx.setfont(1, "Arial", PS(20), string.byte('b'))
-            local numW = gfx.measurestr(step.num)
+            gfx.circle(circleX, circleY, circleR, 1, 1)
+            gfx.set(1, 1, 1, 1) -- White number
+            gfx.setfont(1, "Arial", PS(18), string.byte('b'))
+            local numW, numH = gfx.measurestr(step.num)
             gfx.x = circleX - numW / 2
-            gfx.y = stepY + PS(8)
+            gfx.y = circleY - numH / 2
             gfx.drawstr(step.num)
 
-            -- Step title - LARGER (theme-aware)
+            -- Step title (high contrast)
             gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
-            gfx.setfont(1, "Arial", PS(18), string.byte('b'))
-            gfx.x = PS(105) + textOffsetX
-            gfx.y = stepY
+            gfx.setfont(1, "Arial", PS(16), string.byte('b'))
+            gfx.x = circleX + circleR + PS(20)
+            gfx.y = circleY - PS(18)
             gfx.drawstr(step.title)
 
-            -- Step description (theme-aware)
-            gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+            -- Step description (forced contrast)
             gfx.setfont(1, "Arial", PS(13))
-            gfx.x = PS(105) + textOffsetX
-            gfx.y = stepY + PS(24)
+            if isDarkMode then
+                gfx.set(0.9, 0.9, 0.9, 1)
+            else
+                gfx.set(0.1, 0.1, 0.1, 1)
+            end
+            gfx.x = circleX + circleR + PS(20)
+            gfx.y = circleY + PS(4)
             gfx.drawstr(step.desc)
-
-            -- Extra detail (if space) (theme-aware)
-            if contentH > PS(300) then
-                gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 0.9)
-                gfx.setfont(1, "Arial", PS(11))
-                gfx.x = PS(105) + textOffsetX
-                gfx.y = stepY + PS(42)
-                gfx.drawstr(step.detail)
-            end
-
-            -- Connecting line to next step
-            if i < #steps then
-                gfx.set(stemColors[i][1], stemColors[i][2], stemColors[i][3], 0.3)
-                gfx.line(circleX, stepY + PS(18) + circleR, circleX, stepY + stepSpacing)
-            end
 
             stepY = stepY + stepSpacing
         end
 
-        -- Pro tip at bottom (blinking text, no bar)
-        if contentH > PS(350) then
-            local blink = 0.6 + math.sin(time * 4) * 0.4  -- Blinking effect
-            local proTipText = T("help_pro_tip")
-            gfx.setfont(1, "Arial", PS(13), string.byte('b'))
-            gfx.set(stemColors[4][1], stemColors[4][2], stemColors[4][3], blink)
-            local ptW = gfx.measurestr(proTipText)
-            gfx.x = (w - ptW) / 2 + textOffsetX
-            gfx.y = stepY + PS(20)
-            gfx.drawstr(proTipText)
-        end
+        -- Pro tip at bottom (blinking text)
+        local proTipText = T("help_pro_tip")
+        gfx.setfont(1, "Arial", PS(13), string.byte('b'))
+        local blink = 0.6 + math.sin(time * 4) * 0.4
+        gfx.set(stemColors[4][1], stemColors[4][2], stemColors[4][3], blink)
+        local ptW = gfx.measurestr(proTipText)
+        gfx.x = (w - ptW) / 2 + textOffsetX
+        gfx.y = panelY + panelH - PS(30)
+        gfx.drawstr(proTipText)
 
     elseif helpState.currentTab == 3 then
         -- === STEMS TAB - COMPREHENSIVE STEM INFO ===
@@ -7756,6 +7762,7 @@ local function drawArtGallery()
             end
         end
 
+        -- Draw header
         gfx.setfont(1, "Arial", PS(26), string.byte('b'))
         gfx.set(THEME.text[1], THEME.text[2], THEME.text[3], 1)
         local repTitle = T("help_reaper_title")
@@ -7772,9 +7779,26 @@ local function drawArtGallery()
         gfx.y = contentY + PS(40) + textOffsetY
         gfx.drawstr(repSub)
 
-        local sectionX = PS(40) + textOffsetX
-        local sectionY = contentY + PS(75) + textOffsetY
-        local maxW = w - PS(80)
+        -- Add a legibility background panel for the content area
+        local panelPad = PS(20)
+        local panelX = PS(30) + textOffsetX
+        local panelY = contentY + PS(70) + textOffsetY
+        local panelW = w - PS(60)
+        local panelH = h - panelY - UI(60)
+        
+        -- Subtle theme-aware overlay
+        if isDarkMode then
+            gfx.set(0, 0, 0, 0.65) -- Darker overlay for dark mode
+        else
+            gfx.set(1, 1, 1, 0.82) -- Lighter, thicker overlay for light mode
+        end
+        gfx.rect(panelX, panelY, panelW, panelH, 1)
+        gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], 0.3)
+        gfx.rect(panelX, panelY, panelW, panelH, 0)
+
+        local sectionX = panelX + PS(15)
+        local sectionY = panelY + PS(15)
+        local maxW = panelW - PS(30)
 
         local function drawHelpSection(titleKey, bodyKey)
             local title = T(titleKey)
@@ -7786,8 +7810,14 @@ local function drawArtGallery()
             gfx.drawstr(title)
             sectionY = sectionY + PS(20)
 
+            -- Force high-contrast text colors for help body
+            if isDarkMode then
+                gfx.set(0.9, 0.9, 0.9, 1) -- Near white
+            else
+                gfx.set(0.1, 0.1, 0.1, 1) -- Near black
+            end
+            
             gfx.setfont(1, "Arial", PS(12))
-            gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
             local lines = _wrapTextToWidth(body, maxW)
             for _, ln in ipairs(lines) do
                 gfx.x = sectionX
@@ -9177,11 +9207,61 @@ local function drawTooltip()
         end
 
         gfx.setfont(1, "Arial", S(10))
-        local selectionText = string.format("%d track%s, %d item%s",
-            selTrackCount, selTrackCount == 1 and "" or "s",
-            selItemCount, selItemCount == 1 and "" or "s")
+        -- Compose status info for tooltip (matching footer logic)
+        local selTrackCount = reaper.CountSelectedTracks(0)
+        local selItemCount = reaper.CountSelectedMediaItems(0)
+        local effectiveTargets = 0
+        local viaTimeSelection = false
+        local start_time, end_time = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+        
+        if start_time ~= end_time and (selTrackCount == 0 and selItemCount == 0) then
+            viaTimeSelection = true
+            for i = 0, reaper.CountTracks(0) - 1 do
+                local track = reaper.GetTrack(0, i)
+                local itemCount = reaper.CountTrackMediaItems(track)
+                local hasItemInSelection = false
+                for j = 0, itemCount - 1 do
+                    local item = reaper.GetTrackMediaItem(track, j)
+                    local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+                    local length = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+                    if pos < end_time and pos + length > start_time then
+                        hasItemInSelection = true
+                        break
+                    end
+                end
+                if hasItemInSelection then effectiveTargets = effectiveTargets + 1 end
+            end
+        else
+            effectiveTargets = selTrackCount > 0 and selTrackCount or (selItemCount > 0 and 1 or 0)
+        end
+
+        local trackUnit = trPlural(effectiveTargets, "footer_track", "footer_tracks")
+        local itemUnit = trPlural(selItemCount, "footer_item", "footer_items")
+        local selectionText
+        if viaTimeSelection then
+            selectionText = string.format("%d %s %s", effectiveTargets, trackUnit, T("footer_via_time_selection") or "(via time selection)")
+        else
+            selectionText = string.format("%d %s, %d %s", selTrackCount, trackUnit, selItemCount, itemUnit)
+        end
+
+        local takesText = (SETTINGS.createTakes or SETTINGS.outputMode == "keep-takes") and T("yes") or T("no")
+        
+        -- Build action list (Target)
+        local actions = {}
+        if SETTINGS.createNewTracks then
+            table.insert(actions, T("new_tracks"))
+            if SETTINGS.createFolder then table.insert(actions, "+ " .. T("create_folder")) end
+        elseif SETTINGS.outputMode == "in-place" or SETTINGS.outputMode == "keep-takes" or not SETTINGS.createNewTracks then
+            table.insert(actions, T("in_place"))
+        end
+        if SETTINGS.muteOriginal then table.insert(actions, "+ " .. T("mute_original")) end
+        if SETTINGS.deleteOriginal then table.insert(actions, "+ " .. T("delete_original")) end
+        if SETTINGS.deleteOriginalTrack then table.insert(actions, "+ " .. T("delete_track")) end
+        if SETTINGS.muteSelectionOnly then table.insert(actions, "+ " .. T("mute_selection")) end
+        if SETTINGS.deleteSelectionOnly then table.insert(actions, "+ " .. T("delete_selection")) end
+        local targetText = #actions > 0 and table.concat(actions, " ") or "-"
+
         local selValueW = gfx.measurestr(selectionText)
-        local takesText = SETTINGS.createTakes and "Yes" or "No"
         local takesValueW = gfx.measurestr(takesText)
         local targetValueW = gfx.measurestr(targetText)
 
@@ -9256,19 +9336,33 @@ local function drawTooltip()
         gfx.y = currentY
         gfx.drawstr(T("rich_stems_label") or "Stems")
 
-        gfx.setfont(1, "Arial", S(10), string.byte('b'))
-        local stemX = valueX
-        for i, stem in ipairs(selectedStems) do
-            gfx.set(stem.color[1]/255, stem.color[2]/255, stem.color[3]/255, 1)
-            gfx.x = stemX
-            gfx.y = currentY
-            gfx.drawstr(stem.name)
-            stemX = stemX + gfx.measurestr(stem.name)
-            if i < #selectedStems then
-                gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 1)
+        -- Re-collect selected stems for drawing
+        local activeStems = {}
+        for _, stem in ipairs(STEMS) do
+            if stem.selected and (not stem.sixStemOnly or is6Stem) then
+                table.insert(activeStems, stem)
+            end
+        end
+
+        if #activeStems == 0 then
+            gfx.set(1, 0.3, 0.3, 1) -- Red for warning
+            gfx.x = valueX
+            gfx.drawstr(T("no_stems_selected") or "[!] None")
+        else
+            gfx.setfont(1, "Arial", S(10), string.byte('b'))
+            local stemX = valueX
+            for i, stem in ipairs(activeStems) do
+                gfx.set(stem.color[1]/255, stem.color[2]/255, stem.color[3]/255, 1)
                 gfx.x = stemX
-                gfx.drawstr(" ")
-                stemX = stemX + gfx.measurestr(" ")
+                gfx.y = currentY
+                gfx.drawstr(stem.name)
+                stemX = stemX + gfx.measurestr(stem.name)
+                if i < #activeStems then
+                    gfx.set(THEME.textHint[1], THEME.textHint[2], THEME.textHint[3], 1)
+                    gfx.x = stemX
+                    gfx.drawstr(" ")
+                    stemX = stemX + gfx.measurestr(" ")
+                end
             end
         end
         currentY = currentY + lineH
@@ -11985,7 +12079,7 @@ local function dialogLoop()
         if stem.selected and (not stem.sixStemOnly or is6Stem) then stemsPerTrack = stemsPerTrack + 1 end
     end
     
-    local totalOutputTracks = effectiveTargets * stemsPerTrack
+    local totalOutputStems = effectiveTargets * stemsPerTrack
     local outLine
     local locLine
     local locationPrefix = T("target") or "Location:"
@@ -11998,11 +12092,12 @@ local function dialogLoop()
         -- Normal output calculation
         if SETTINGS.createNewTracks then
             outLine = string.format("%s %s", T("output"), 
-                string.format(T("footer_output_calc") or "%d stems (%d x %d tracks)", totalOutputTracks, stemsPerTrack, effectiveTargets))
+                string.format(T("footer_output_calc") or "%d stems (%d x %d tracks)", totalOutputStems, stemsPerTrack, effectiveTargets))
         else
-            local outItemCount = selItemCount > 0 and (selItemCount * stemsPerTrack) or stemsPerTrack
-            local takeUnit = trSingularPlural(outItemCount, "footer_take", "footer_takes")
-            outLine = string.format("%s %d %s (in %d %s)", T("output"), outItemCount, takeUnit, effectiveTargets, trackUnit)
+            -- In-place / Takes mode
+            local takeUnit = trPlural(stemsPerTrack, "footer_take", "footer_takes")
+            outLine = string.format("%s %d %s per track (%d total)", 
+                T("output"), stemsPerTrack, takeUnit, totalOutputStems)
         end
 
         -- 3. Location line
@@ -12017,8 +12112,8 @@ local function dialogLoop()
         if SETTINGS.createNewTracks then
             local baseLoc = effectiveTargets > 1 and (T("footer_per_track_folders") or "Per-track stem folders") or T("footer_location_new_folder")
             locLine = string.format("%s %s (%d: %s)", locationPrefix, baseLoc, stemsPerTrack, namesStr)
-        elseif SETTINGS.outputMode == "in-place" then
-            locLine = string.format("%s %s", locationPrefix, string.format(T("footer_location_in_place"), stemsPerTrack))
+        elseif SETTINGS.outputMode == "in-place" or not SETTINGS.createNewTracks then
+            locLine = string.format("%s %s (%d: %s)", locationPrefix, T("in_place") or "In-place", stemsPerTrack, namesStr)
         else
             locLine = string.format("%s %s", locationPrefix, T("footer_location_new_tracks"))
         end
@@ -12026,20 +12121,28 @@ local function dialogLoop()
 
 
     -- Draw 3 separate translucent blocks (theme-aware)
-    local function drawStatusBlock(blockY, text)
+    local function drawStatusBlock(blockY, text, isWarning)
         gfx.set(THEME.inputBg[1], THEME.inputBg[2], THEME.inputBg[3], statusBlockAlpha)
         gfx.rect(0, blockY, gfx.w, statusBlockH, 1)
         gfx.set(THEME.border[1], THEME.border[2], THEME.border[3], statusBlockBorderAlpha)
         gfx.rect(0, blockY, gfx.w, statusBlockH, 0)
+        
+        if isWarning then
+            gfx.set(1, 0.3, 0.3, 1) -- Red for warning
+        else
+            gfx.set(THEME.textDim[1], THEME.textDim[2], THEME.textDim[3], 1)
+        end
         drawCenteredStatusLine(blockY + statusBlockPadY, text)
     end
 
     local block1Y = statusBarY
     local block2Y = block1Y + statusBlockH + statusBlockGap
     local block3Y = block2Y + statusBlockH + statusBlockGap
-    drawStatusBlock(block1Y, selLine)
-    drawStatusBlock(block2Y, outLine)
-    drawStatusBlock(block3Y, locLine)
+    
+    local isWarning = (stemsPerTrack == 0)
+    drawStatusBlock(block1Y, selLine, false)
+    drawStatusBlock(block2Y, outLine, isWarning)
+    drawStatusBlock(block3Y, locLine, isWarning)
 
     -- Row 4: Buttons layout (Close left, STEMwerk right)
     local footerMarginX = S(10)

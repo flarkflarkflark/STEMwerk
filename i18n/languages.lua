@@ -237,7 +237,7 @@ local LANGUAGES = {
 
         -- Messages
         no_stems_selected = "No Stems Selected",
-        please_select_stem = "Please click on one or more stem buttons (Vocals, Drums, Bass, Other) in the center column before starting.",
+        please_select_stem = "Select one or more stems in the center column to start.",
         separation_cancelled = "Separation cancelled.",
         separation_timeout = "Separation timed out after 10 minutes.",
 
@@ -385,6 +385,12 @@ local LANGUAGES = {
         footer_location_new_folder = "New folder with stem tracks",
         footer_location_new_tracks = "Nieuwe tracks onder bron",
         footer_location_in_place = "In-place (als %d takes op brontracks)",
+        footer_target_prefix = "Doelwitten:",
+        footer_via_time_selection = "(via tijdselectie)",
+        footer_per_track_folders = "Stem-mappen per track",
+        footer_output_calc = "%d stems (%d x %d tracks)",
+        footer_using_device = "Gebruikt: %s",
+        footer_device_none = "CPU (Geen GPU)",
 
         -- Stems
         vocals = "Zang",
