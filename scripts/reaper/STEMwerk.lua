@@ -3,8 +3,9 @@ function debugLog(msg) end
 function clearDebugLog() end
 -- @description Stemwerk: Main
 -- @author flarkAUDIO
--- @version 2.1.9
+-- @version 2.2.0
 -- @changelog
+--   2026-03-13: Refactor to STEMwerk-reaper: uses stemwerk-core engine, REAPER-focused workflow
 --   2026-01-12: Help text pan/zoom across non-gallery tabs, smoother text pan + reset
 --   2026-01-12: Linux CUDA cuDNN path fix, selection rules clarified, help window positioning/persistence
 --   2026-01-12: Fixed importlib.util import for Linux/Arch compatibility, improved Python venv detection
