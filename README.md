@@ -1,14 +1,21 @@
-# STEMwerk
+# STEMwerk-reaper
 
 <p align="center">
   <img src="docs/assets/stemwerk-dynamic.svg" alt="STEMwerk dynamic logo" width="900">
 </p>
 
-STEMwerk is a REAPER script that runs **Demucs-based stem separation** via a Python worker, with a REAPER-native UI, progress windows, debug logging, and **capability-driven device selection** (CPU / CUDA / ROCm / DirectML / MPS when available).
+**STEMwerk-reaper** is the REAPER-integrated frontend for the STEMwerk ecosystem. It provides a native REAPER UI for **Demucs-based stem separation** via the `stemwerk-core` engine, featuring progress windows, debug logging, and **capability-driven device selection** (CPU / CUDA / ROCm / DirectML / MPS).
+
+## Ecosystem
+
+STEMwerk-reaper is part of a larger suite of tools:
+- [**STEMwerk-core**](https://github.com/flarkflarkflark/STEMwerk-core): The underlying Python engine for high-performance stem separation.
+- [**STEMwerk-standalone**](https://github.com/flarkflarkflark/STEMwerk-standalone): A standalone GUI application for users who don't use REAPER.
+- [**STEMwerk-reaper**](https://github.com/flarkflarkflark/STEMwerk-reaper): (This repository) The script-based integration specifically for REAPER.
 
 ## Python interpreter: cross-platform & fallback
 
-STEMwerk automatically looks for a suitable Python interpreter. For best compatibility on Windows, Linux, and macOS:
+STEMwerk-reaper automatically looks for a suitable Python interpreter. For best compatibility on Windows, Linux, and macOS:
 
 1. **Recommended:** Create a virtual environment in the repo root:
    - Windows: `.venv\Scripts\python.exe`
